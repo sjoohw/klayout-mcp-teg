@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp/
+.pytest-*/
+.venv/
+.agents/
+.codex-remote-attachments/
+.skill-test/
+.sync-klayout-mcp-teg/
+artifacts/
+automation/
+dist/
+build/
+*.egg-info/

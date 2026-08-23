@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q
+      - run: python -m compileall -q src tests
+
+  linux-csh-launcher:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: sudo apt-get update && sudo apt-get install -y csh
+      - run: python -m pip install -e ".[dev]"
+      - run: csh scripts/run-klayout-teg-mcp.csh </dev/null
+
+  klayout-integration:
+    runs-on: ubuntu-24.04
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install KLayout 0.30.10
+        run: |
+          curl -fsSLo klayout.deb https://www.klayout.org/downloads/Ubuntu-24/klayout_0.30.10-1_amd64.deb
+          echo "674a26b464841ac7385dec3cc47c2c60  klayout.deb" | md5sum -c -
+          sudo apt-get update
+          sudo apt-get install -y ./klayout.deb
+      - run: python -m pip install -e ".[dev]"
+      - run: klayout -v
+      - run: python -m pytest -q
