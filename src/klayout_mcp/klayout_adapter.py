@@ -179,6 +179,7 @@ def run_klayout_worker(
         try:
             completed = subprocess.run(
                 command,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,

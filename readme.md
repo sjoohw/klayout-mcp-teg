@@ -32,7 +32,7 @@ electrical_connectivity_verified: false
 - 지원 기준: KLayout 0.30.0 이상.
 - Python: 3.11 이상.
 - MCP SDK: 1.27 이상, 2.0 미만.
-- 전체 회귀 테스트: 135 passed.
+- 전체 회귀 테스트: 136 passed.
 - Python `compileall`: passed.
 - pytest 종료 warning: 외부 `pydantic-settings 2.15.0`의
   `IncompleteFieldDefinitionWarning` 1건.
@@ -300,6 +300,28 @@ Pad 검출 방식:
 - 90도 회전/수직 TEG profile은 미지원.
 - Morphological opening은 Pad보다 route가 충분히 좁다는 전제가 있음.
 - Complex arbitrary-angle conductor의 의미는 foundry extraction으로 검증하지 않음.
+
+### SLN001 padset 실파일 검증
+
+2026-08-24에 로컬 `SLN001_padset.gds`를 KLayout 0.30.10과 실제 stdio MCP로
+검증했다. 파일은 로컬 검증 artifact이며 GitHub 배포물에는 포함하지 않는다.
+
+- SHA-256: `e4d322da470627c2de0e7c23d1987dc6c571c5503a24323f1b870ea2156ecc0c`.
+- Top cell: `SLN001_PADSET`; DBU: 0.00025 um; bbox: 2000 um × 54 um.
+- Cell 2개, top-level mesh-pad instance 25개.
+- 생성 자료에 명시된 M1 `(15, 0)`과 outline `(62, 20)`을 사용했으며 display
+  정보로 layer 역할을 추측하지 않음.
+- M1 raw box 2000개를 25개 독립 component와 25개 pad로 정규화.
+- 25 pads, 21 DUT slots, pad short 0건.
+- Source/Drain landing 42개 resolved; Gate/Body landing 42개 unresolved.
+- 21-site 기본 parameter sequence는 1개 variant로 계획되지만
+  `all_landings_resolved: false`이므로 production assembly 준비 완료가 아님.
+- Overlay marker: pads 25, slots 21, resolved 42, unresolved 42, labels 46.
+- 분석 전후 원본 SHA-256 동일; overlay는 별도 PNG로 생성.
+
+이 검증에서 stdio MCP가 KLayout subprocess에 프로토콜 stdin을 상속해 작은 GDS도
+timeout되는 문제를 발견했다. Worker stdin을 `DEVNULL`로 격리한 뒤 동일 stdio 호출이
+`isError: false`로 완료되는 것을 재검증했다.
 
 ### Overlay
 
@@ -614,7 +636,7 @@ uv run --extra dev python -m compileall -q src tests
 현재 전체 결과:
 
 ```text
-135 passed, 1 upstream dependency warning
+136 passed, 1 upstream dependency warning
 compileall passed
 ```
 
@@ -636,6 +658,7 @@ compileall passed
 - 실제 stdio `ClientSession`의 status, PCell contract, output schema와 `isError`.
 - Null/invalid slot origin이 stdio에서 `INVALID_DUT_SLOT_ORIGIN`과 `isError: true`로 전달.
 - KLayout subprocess timeout의 structured error.
+- KLayout worker가 MCP stdio를 상속하지 않는지 검사.
 - Existing artifact 비덮어쓰기.
 
 CI matrix:
@@ -682,6 +705,7 @@ GitHub Actions workflow와 launcher는 작성되어 있다. 로컬 Windows 검�
 | Null `origin_um`이 raw `TypeError` 발생 | `INVALID_DUT_SLOT_ORIGIN` structured error로 해결 |
 | `Point`가 bool/text/NaN/Inf 좌표 허용 | 생성 시 finite numeric validation으로 해결 |
 | 일부 expected error의 조치 안내 누락 | 모든 `AnalysisError` 생성 경로에 `next_action` 추가 |
+| stdio MCP의 KLayout worker가 protocol stdin 상속 | `stdin=DEVNULL` 격리와 회귀 검사로 해결 |
 
 ## 20. 개선 과정과 체크포인트 요약
 
@@ -740,6 +764,13 @@ Feedback hardening 2단계:
 - Pitch, layermap, timeout, KLayout response를 포함한 actionable error 일관성 감사.
 - Direct API와 실제 stdio MCP 오류 회귀 검사.
 - 135 tests.
+
+SLN001 실파일 검증 단계:
+
+- Mesh pad 25개와 21개 DUT slot을 실제 KLayout/stdio MCP 경로로 검출.
+- Overlay를 렌더링하고 Source/Drain resolved, Gate/Body unresolved 상태를 시각 확인.
+- MCP stdio를 상속한 KLayout worker timeout을 수정하고 회귀 검사 추가.
+- 136 tests.
 
 ## 21. 미비사항과 우선순위
 

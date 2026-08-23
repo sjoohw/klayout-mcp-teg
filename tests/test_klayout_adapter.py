@@ -50,6 +50,31 @@ def test_worker_timeout_is_structured(tmp_path, monkeypatch) -> None:
     assert caught.value.next_action
 
 
+def test_worker_does_not_inherit_mcp_stdio_stdin(tmp_path, monkeypatch) -> None:
+    executable = tmp_path / "klayout.exe"
+    executable.write_bytes(b"placeholder")
+
+    def complete(command, **kwargs):
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        response_definition = next(
+            command[index + 1]
+            for index, argument in enumerate(command[:-1])
+            if argument == "-rd" and command[index + 1].startswith("response_path=")
+        )
+        response_path = Path(response_definition.split("=", 1)[1])
+        response_path.write_text('{"worker": "ok"}', encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", complete)
+
+    result = run_klayout_worker(
+        {"operation": "test"},
+        executable_path=str(executable),
+    )
+
+    assert result == {"worker": "ok"}
+
+
 @pytest.mark.parametrize("layout_suffix", [".gds", ".oas"])
 def test_analyze_hierarchical_padset_with_installed_klayout(
     tmp_path, layout_suffix: str

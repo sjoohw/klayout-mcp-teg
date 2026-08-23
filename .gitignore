@@ -10,6 +10,7 @@ __pycache__/
 .sync-klayout-mcp-teg/
 artifacts/
 automation/
+output/
 dist/
 build/
 *.egg-info/
