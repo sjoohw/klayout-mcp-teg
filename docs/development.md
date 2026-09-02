@@ -23,12 +23,15 @@ src/klayout_mcp/
 klayout_plugin/              PCellizer/Reference KLayout GUI
 examples/                    Cataloged runnable/GDS/style/UI/reference examples
 artifacts/                   Preserved golden/reference artifacts
-skills/                      Optional LLM orchestration instructions
+skills/
+├─ klayout-drawing/          General pya/PCell/hierarchy/fresh-reload skill and helpers
+└─ klayout-teg-routing/      Kelvin-specific measurement/routing orchestration
 tests/                       Pure, stdio and KLayout integration tests
 ```
 
 MCP runtime은 repository의 skill 파일을 읽지 않는다. Skill은 LLM이 질문과 tool 순서를
-일관되게 따르도록 돕는 선택적 orchestration layer다.
+일관되게 따르도록 돕는 선택적 orchestration layer다. `klayout-drawing`은 로컬 환경에만
+존재하는 전제 없이 저장소에 완전한 references/scripts/assets와 함께 보관한다.
 
 ## 로컬 검증
 

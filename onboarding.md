@@ -20,6 +20,8 @@ Schema 통과만으로 production, 측정 가능성 또는 sign-off를 선언하
 
 ## LLM 행동 원칙
 
+- 작업 시작 시 저장소의 `skills/klayout-drawing/SKILL.md`를 읽고, Kelvin 구조라면 추가로
+  `skills/klayout-teg-routing/SKILL.md`를 읽는다. 로컬 사용자 skill 설치를 전제로 하지 않는다.
 - 처음에는 `server_status`, 다음에는 `describe_pdk_profile_inputs`를 호출한다.
 - `describe_process_capability`에서 내장 profile을 찾으려 하지 않는다. 내장 profile이 없는 것이 정상이다.
 - 사용자가 이미 제공한 답을 다시 묻지 않는다. 빠진 항목을 출처별로 묶어 한 번에 질문한다.

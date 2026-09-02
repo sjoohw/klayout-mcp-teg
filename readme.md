@@ -9,6 +9,12 @@ MCP 서버다. Package/command 이름은 호환성을 위해 `klayout-teg-mcp`�
 Fabrication process profile은 의도적으로 번들하지 않는다. 실제 사용 전 타깃 공정의 layermap,
 grid, 필요한 rule과 device geometry 근거를 [onboarding.md](onboarding.md)에 따라 등록해야 한다.
 
+LLM orchestration 지침도 저장소에 함께 둔다. 범용 GDS/PCell 작업은
+[`skills/klayout-drawing`](skills/klayout-drawing/SKILL.md), Kelvin routing은
+[`skills/klayout-teg-routing`](skills/klayout-teg-routing/SKILL.md)을 사용한다. 이 파일들은
+프로젝트의 재현 가능한 지침이며 MCP runtime의 숨은 의존성이 아니다. Host가 project-local skill을
+자동 탐색하지 않으면 해당 디렉터리를 명시적으로 등록하거나 LLM context로 제공해야 한다.
+
 > 기본 checkout에는 trusted approval backend, production process engine, foundry
 > DRC/LVS/PEX adapter, signoff policy, approved scribe/probe-pad 계약이 없다. 따라서 모든 stock
 > 생성 결과는 비생산용이다. Fresh reload, XOR와 internal connectivity 검사는 file/geometry
