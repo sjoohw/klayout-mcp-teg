@@ -123,11 +123,11 @@ Pad macro/DUT adapter와 full-PDK DRC/PEX를 연결하지 않았으므로 이를
 | Review hardening | `c4d456481a214cf380e91e507aed92c1f77e03f8` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `708 passed, 1 warning`; [Actions run 33626068843](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33626068843) 전체 green | Windows/Ubuntu 3.11·3.13, wheel, csh, KLayout 0.30.10 통합 통과 |
 | Evidence hardening | code `afd90cd7dbdfdac4ca4d76bee8a5a6ee583fde80`, docs `084a6c116f4021317f90c3a2dd26e28892e157c0` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `715 passed, 1 warning`; [Actions run 33637295915](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33637295915) 전체 green | Lifecycle chain/content-address/schema와 Windows/Ubuntu/KLayout 통합 회귀 통과 |
 | Qualification-gate hardening | code `dbd25060dc35e48e8d1cc55dd9bf313d8bac3d77`, docs `21a4b28cdd58122700ee80adca45e692b28400bf` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `719 passed, 1 warning`; [Actions run 33643053110](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33643053110) 전체 green | Lifecycle trusted head, exact fingerprint/DBU hard gate와 persisted DOE identifiability를 Windows/Ubuntu/KLayout에서 통과 |
-| Policy/model/anchor hardening | code `eb02520b53c95c200ccc6d42413a9d19767ac1bb` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `722 passed, 1 warning`; remote CI 확인 전 | Host-owned candidate policy, compiler-declared basis rank와 optional external lifecycle anchor 회귀 통과 |
+| Policy/model/anchor hardening | code `eb02520b53c95c200ccc6d42413a9d19767ac1bb`, docs `c20522356fc51b4061d3b85a1c5c910f51ff0f3d` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `722 passed, 1 warning`; [Actions run 33693275318](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33693275318) 전체 green | Host-owned candidate policy, compiler-declared basis rank와 optional external lifecycle anchor를 Windows/Ubuntu/KLayout에서 통과 |
 
 Local pass와 remote CI green은 별도 조건이다. Review-hardening과 evidence-hardening code set은
-두 조건을 모두 통과했다. Qualification-gate hardening도 동일 code/docs snapshot의 remote CI까지
-통과했다. 최신 policy/model/anchor hardening은 아래 문서 commit을 push한 뒤 동일 remote CI를 확인한다.
+두 조건을 모두 통과했다. Qualification-gate hardening과 최신 policy/model/anchor hardening도 각각
+표에 적힌 동일 code/docs snapshot의 remote CI까지 통과했다.
 이는 repository regression 기준선이며 실제 target transistor/foundry qualification을 뜻하지 않는다.
 
 `feedback.md`와 `answer.md`는 각 검토 시점의 historical record다. 현재 상태의 권위 있는 요약은
