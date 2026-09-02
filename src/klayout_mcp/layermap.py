@@ -56,7 +56,9 @@ def _parse_layer_spec(name: str, value: object) -> LayerSpec:
     )
 
 
-def load_layermap(path: str | Path) -> dict[str, LayerSpec]:
+def load_layermap(
+    path: str | Path, *, require_m1: bool = True
+) -> dict[str, LayerSpec]:
     source = Path(path).expanduser().resolve()
     if not source.is_file():
         raise AnalysisError(
@@ -104,7 +106,7 @@ def load_layermap(path: str | Path) -> dict[str, LayerSpec]:
         result[name] = _parse_layer_spec(raw_name, value)
         original_names[name] = raw_name
 
-    if "m1" not in result:
+    if require_m1 and "m1" not in result:
         raise AnalysisError(
             code="M1_NOT_IN_LAYERMAP",
             message="Layermap has no explicit m1 entry.",

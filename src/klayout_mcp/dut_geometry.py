@@ -7,12 +7,13 @@ from dataclasses import dataclass, field
 import math
 from typing import Any, Sequence
 
+from .design_contract import validate_orthogonal_m1_shapes
 from .errors import AnalysisError
 from .geometry import Box, Point
 from .selection import select_routed_units
 
 
-DUT_PCELL_CONTRACT_VERSION = 1
+DUT_PCELL_CONTRACT_VERSION = 2
 
 
 def _default_device_window() -> Box:
@@ -223,9 +224,50 @@ def describe_dut_pcell_contract() -> dict[str, Any]:
             "x_positive": "right",
             "y_positive": "top",
         },
+        "dimension_semantics_contract": {
+            "confirmation_required_before_geometry": True,
+            "automatic_axis_inference": False,
+            "generic_or_resistor_geometry": (
+                "width is transverse to current flow; length is longitudinal to current flow"
+            ),
+            "numeric_order_required": False,
+            "device_specific_w_l": (
+                "must be explicitly confirmed when W/L are electrical device parameters"
+            ),
+            "axis_mapping_behavior": (
+                "preserve the confirmed transverse/longitudinal roles; never infer or swap"
+            ),
+        },
+        "routing_policy": {
+            "style": "orthogonal_only",
+            "allowed_segment_directions": ["horizontal", "vertical"],
+            "diagonal_segments_allowed": False,
+            "arbitrary_angle_segments_allowed": False,
+        },
+        "parasitic_resistance_policy": {
+            "objective": "minimize_routing_parasitic_resistance",
+            "optimized_without_extracted_rc_evidence": False,
+            "required_for_optimal_claim": (
+                "approved process rules/resistance data and extracted-RC candidate comparison"
+            ),
+        },
         "parameter_schema": [
-            {"name": "w_um", "type": "float", "unit": "um", "default": defaults.w_um, "exclusive_minimum": 0.0},
-            {"name": "l_um", "type": "float", "unit": "um", "default": defaults.l_um, "exclusive_minimum": 0.0},
+            {
+                "name": "w_um",
+                "type": "float",
+                "unit": "um",
+                "default": defaults.w_um,
+                "exclusive_minimum": 0.0,
+                "meaning": "device-specific transistor width after explicit confirmation",
+            },
+            {
+                "name": "l_um",
+                "type": "float",
+                "unit": "um",
+                "default": defaults.l_um,
+                "exclusive_minimum": 0.0,
+                "meaning": "device-specific transistor gate length after explicit confirmation",
+            },
             {"name": "array_rows", "type": "integer", "default": defaults.array_rows, "minimum": 1},
             {"name": "array_cols", "type": "integer", "default": defaults.array_cols, "minimum": 1},
             {"name": "pitch_x_um", "type": "float", "unit": "um", "default": defaults.pitch_x_um, "exclusive_minimum": 0.0},
@@ -280,6 +322,22 @@ class DutGeometryResult:
             "geometry_status": "conceptual_scaffold",
             "electrical_connectivity_verified": False,
             "process_geometry_verified": False,
+            "routing_policy": {
+                "style": "orthogonal_only",
+                "allowed_segment_directions": ["horizontal", "vertical"],
+                "diagonal_segments_allowed": False,
+                "arbitrary_angle_segments_allowed": False,
+                "orthogonal_routing_verified": True,
+            },
+            "parasitic_resistance": {
+                "objective": "minimize_routing_parasitic_resistance",
+                "optimized": False,
+                "status": "not_proven_optimal",
+                "reason": (
+                    "No approved process resistance data and extracted-RC candidate "
+                    "comparison were supplied."
+                ),
+            },
             "warning": (
                 "Process layers and verified internal S/D/G/B connectivity are unresolved; "
                 "do not use this scaffold as a production layout."
@@ -304,7 +362,11 @@ class DutGeometryResult:
         }
 
 
-def build_dut_geometry(params: DutParameters | None = None) -> DutGeometryResult:
+def build_dut_geometry(
+    params: DutParameters | None = None,
+    *,
+    dbu_um: float | None = None,
+) -> DutGeometryResult:
     """Deterministic, pure-geometry generation for a parameterized DUT transistor array.
 
     Local coordinate origin (0, 0) is at the DUT slot center.
@@ -317,6 +379,19 @@ def build_dut_geometry(params: DutParameters | None = None) -> DutGeometryResult
 
     cfg = params or DutParameters()
     cfg.validate()
+    if dbu_um is not None and (
+        isinstance(dbu_um, bool)
+        or not isinstance(dbu_um, (int, float))
+        or not math.isfinite(float(dbu_um))
+        or float(dbu_um) <= 0
+    ):
+        raise AnalysisError(
+            code="INVALID_DBU",
+            message="DBU must be a finite positive micron value.",
+            details={"dbu_um": dbu_um},
+            next_action="Use the DBU reported by the target layout.",
+        )
+    boundary_tolerance_um = float(dbu_um) if dbu_um is not None else 0.0
 
     # 1. Calculate array unit centers centered at local (0, 0)
     cols, rows = cfg.array_cols, cfg.array_rows
@@ -345,10 +420,10 @@ def build_dut_geometry(params: DutParameters | None = None) -> DutGeometryResult
 
     dev_win = cfg.device_window_um
     if (
-        array_bbox.x1 < dev_win.x1 - 1e-4
-        or array_bbox.x2 > dev_win.x2 + 1e-4
-        or array_bbox.y1 < dev_win.y1 - 1e-4
-        or array_bbox.y2 > dev_win.y2 + 1e-4
+        array_bbox.x1 < dev_win.x1 - boundary_tolerance_um
+        or array_bbox.x2 > dev_win.x2 + boundary_tolerance_um
+        or array_bbox.y1 < dev_win.y1 - boundary_tolerance_um
+        or array_bbox.y2 > dev_win.y2 + boundary_tolerance_um
     ):
         raise AnalysisError(
             code="DEVICE_EXCEEDS_WINDOW",
@@ -356,6 +431,8 @@ def build_dut_geometry(params: DutParameters | None = None) -> DutGeometryResult
             details={
                 "array_bbox_um": array_bbox.to_list(),
                 "device_window_um": dev_win.to_list(),
+                "boundary_tolerance_um": boundary_tolerance_um,
+                "dbu_um": dbu_um,
             },
             next_action="Reduce array_rows/array_cols/pitch or increase device_window.",
         )
@@ -383,6 +460,21 @@ def build_dut_geometry(params: DutParameters | None = None) -> DutGeometryResult
     active_h = max(cfg.l_um + 0.8, 1.0)
     poly_w = cfg.l_um
     poly_h = active_w + 0.4
+    contact_center_separation = active_h - 2.0 * (contact_half + 0.05)
+    if cfg.m1_width_um >= contact_center_separation:
+        raise AnalysisError(
+            code="DUT_M1_LANDING_SHORT_RISK",
+            message="Requested M1 landing width would merge the source and drain landings.",
+            details={
+                "m1_width_um": cfg.m1_width_um,
+                "source_drain_center_separation_um": contact_center_separation,
+                "l_um": cfg.l_um,
+            },
+            next_action=(
+                "Reduce m1_width_um or use a separately verified contact/active topology "
+                "with greater source-drain separation."
+            ),
+        )
 
     for idx, center in enumerate(unit_centers, start=1):
         cx, cy = center.x, center.y
@@ -403,7 +495,10 @@ def build_dut_geometry(params: DutParameters | None = None) -> DutGeometryResult
 
         # Local M1 taps for selected routed transistors
         if idx in routed_indices_set:
-            m1_tap_w = min(cfg.m1_width_um, contact_size + 0.08)
+            # Honor the validated public parameter exactly.  Never silently cap
+            # a requested landing width; the short-risk guard above rejects an
+            # incompatible width before any geometry is emitted.
+            m1_tap_w = cfg.m1_width_um
             tap_half = m1_tap_w / 2.0
             # Local S/D landing pads
             m1_shapes.append({
@@ -425,8 +520,12 @@ def build_dut_geometry(params: DutParameters | None = None) -> DutGeometryResult
     m1_w = cfg.m1_width_um
     half_m1 = m1_w / 2.0
 
-    # Source trunk (left): vertical collector + horizontal landing stub to left boundary
-    s_trunk_x = min(p.x for p in unit_centers) - 1.0
+    # Source/drain collectors are derived from emitted active geometry rather
+    # than a fixed 1 um offset.  Keep an explicit gap from the device geometry;
+    # this scaffold does not pretend that an unverified local contact route is
+    # electrically complete.
+    collector_clearance = cfg.m1_overlap_um
+    s_trunk_x = min(box[0] for box in active_boxes) - collector_clearance - half_m1
     m1_shapes.append({
         "net": "source",
         "type": "box",
@@ -441,7 +540,7 @@ def build_dut_geometry(params: DutParameters | None = None) -> DutGeometryResult
     })
 
     # Drain trunk (right): vertical collector + horizontal landing stub to right boundary
-    d_trunk_x = max(p.x for p in unit_centers) + 1.0
+    d_trunk_x = max(box[2] for box in active_boxes) + collector_clearance + half_m1
     m1_shapes.append({
         "net": "drain",
         "type": "box",
@@ -485,7 +584,10 @@ def build_dut_geometry(params: DutParameters | None = None) -> DutGeometryResult
         "bbox_um": [-half_m1, rout_bound.y1 - cfg.m1_overlap_um, half_m1, b_trunk_y + half_m1],
     })
 
-    # 6. Structured terminal metadata contract
+    # 6. Reject diagonal/arbitrary-angle routing at the canonical source.
+    validate_orthogonal_m1_shapes(m1_shapes)
+
+    # 7. Structured terminal metadata contract
     terminals = build_terminal_contract(cfg)
 
     return DutGeometryResult(

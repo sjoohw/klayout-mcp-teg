@@ -14,8 +14,12 @@ class AnalysisError(ValueError):
     message: str
     details: dict[str, Any] = field(default_factory=dict)
     next_action: str | None = None
+    example_fix_payload: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        if self.example_fix_payload is not None:
+            self.details = dict(self.details)
+            self.details.setdefault("example_fix_payload", self.example_fix_payload)
         ValueError.__init__(self, self.message)
 
     def __str__(self) -> str:

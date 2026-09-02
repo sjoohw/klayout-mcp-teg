@@ -9,6 +9,7 @@ import pytest
 from klayout_mcp.errors import AnalysisError
 from klayout_mcp.klayout_adapter import find_klayout_executable
 from klayout_mcp.klayout_adapter import run_klayout_worker
+from klayout_mcp.klayout_adapter import _klayout_not_found_next_action
 from klayout_mcp import server
 from klayout_mcp.server import analyze_padset, render_boundary_overlay
 
@@ -28,6 +29,14 @@ def test_worker_start_failure_is_not_reported_as_snapshot_failure(
         run_klayout_worker({"operation": "test"}, executable_path=str(executable))
 
     assert caught.value.code == "KLAYOUT_START_FAILED"
+
+
+def test_klayout_not_found_guidance_matches_windows_shell() -> None:
+    guidance = _klayout_not_found_next_action()
+
+    assert "PowerShell" in guidance
+    assert "$env:KLAYOUT_EXE" in guidance
+    assert "setenv" not in guidance
 
 
 def test_worker_timeout_is_structured(tmp_path, monkeypatch) -> None:

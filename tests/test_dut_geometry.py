@@ -72,6 +72,61 @@ def test_routed_device_count_changes_m1_inventory() -> None:
     assert len(four.m1_shapes_um) - len(one.m1_shapes_um) == 2 * (4 - 1)
 
 
+def test_local_m1_landing_honors_requested_width_without_silent_cap() -> None:
+    result = build_dut_geometry(
+        DutParameters(
+            array_rows=1,
+            array_cols=1,
+            routed_device_count=1,
+            m1_width_um=0.5,
+        )
+    )
+    local = [shape for shape in result.m1_shapes_um if shape.get("unit") == 1]
+
+    assert len(local) == 2
+    for shape in local:
+        x1, y1, x2, y2 = shape["bbox_um"]
+        assert x2 - x1 == pytest.approx(0.5)
+        assert y2 - y1 == pytest.approx(0.5)
+
+
+def test_incompatible_m1_landing_width_is_rejected_before_geometry() -> None:
+    with pytest.raises(AnalysisError) as caught:
+        build_dut_geometry(
+            DutParameters(
+                array_rows=1,
+                array_cols=1,
+                routed_device_count=1,
+                m1_width_um=0.8,
+            )
+        )
+
+    assert caught.value.code == "DUT_M1_LANDING_SHORT_RISK"
+    assert caught.value.details["source_drain_center_separation_um"] == pytest.approx(0.68)
+
+
+def test_collectors_are_derived_from_active_edges_and_requested_clearance() -> None:
+    params = DutParameters(
+        l_um=2.0,
+        array_rows=1,
+        array_cols=1,
+        routed_device_count=1,
+        m1_width_um=0.4,
+        m1_overlap_um=0.3,
+    )
+    result = build_dut_geometry(params)
+    named = {
+        shape.get("name"): shape["bbox_um"]
+        for shape in result.m1_shapes_um
+        if shape.get("name")
+    }
+    active_left = result.active_boxes_um[0][0]
+    active_right = result.active_boxes_um[0][2]
+
+    assert named["source_collector"][2] == pytest.approx(active_left - 0.3)
+    assert named["drain_collector"][0] == pytest.approx(active_right + 0.3)
+
+
 def test_device_exceeds_window_raises_structured_error() -> None:
     # 20 rows x 20 cols with 2.0 pitch exceeds 35x40 um device window
     params = DutParameters(
@@ -87,6 +142,25 @@ def test_device_exceeds_window_raises_structured_error() -> None:
 
     assert exc.value.code == "DEVICE_EXCEEDS_WINDOW"
     assert "array_bbox_um" in exc.value.details
+
+
+def test_device_window_tolerance_is_derived_from_target_dbu() -> None:
+    params = DutParameters(
+        w_um=12.0004,
+        l_um=0.1,
+        array_rows=1,
+        array_cols=1,
+        routed_device_count=1,
+        device_window_um=Box(-6.0, -6.0, 6.0, 6.0),
+    )
+
+    with pytest.raises(AnalysisError) as exc:
+        build_dut_geometry(params)
+    assert exc.value.code == "DEVICE_EXCEEDS_WINDOW"
+    assert exc.value.details["boundary_tolerance_um"] == 0.0
+
+    result = build_dut_geometry(params, dbu_um=0.001)
+    assert result.total_units == 1
 
 
 def test_invalid_parameters_raise_error() -> None:
@@ -162,7 +236,7 @@ def test_vertical_collectors_stay_inside_routing_boundary() -> None:
 def test_contract_is_explicit_about_missing_production_inputs() -> None:
     contract = describe_dut_pcell_contract()
 
-    assert contract["contract_version"] == 1
+    assert contract["contract_version"] == 2
     assert contract["pcell_name"] == "DutTransistorArray"
     assert contract["production_ready"] is False
     assert [item["name"] for item in contract["parameter_schema"]] == [
@@ -181,6 +255,14 @@ def test_contract_is_explicit_about_missing_production_inputs() -> None:
     assert set(contract["terminals"]) == {"source", "drain", "gate", "body"}
     assert "sample DUT GDS/OAS and parameter explanation" in contract["required_production_inputs"]
     assert contract["next_action"]
+    assert contract["routing_policy"]["style"] == "orthogonal_only"
+    assert contract["routing_policy"]["diagonal_segments_allowed"] is False
+    assert (
+        contract["dimension_semantics_contract"]
+        ["confirmation_required_before_geometry"]
+        is True
+    )
+    assert contract["parasitic_resistance_policy"]["optimized_without_extracted_rc_evidence"] is False
 
 
 @pytest.mark.parametrize("value", [0.0, float("nan"), float("inf")])

@@ -31,6 +31,7 @@ def create_layout_snapshot(
     layout_path: str,
     *,
     purpose: str = "padset",
+    temporary_root: str | None = None,
 ) -> Iterator[LayoutSnapshot]:
     """Copy one input layout once and reject a source change during capture."""
 
@@ -51,13 +52,21 @@ def create_layout_snapshot(
             "failed": "SAMPLE_LAYOUT_SNAPSHOT_FAILED",
             "prefix": "klayout-sample-snapshot-",
         },
+        "layout": {
+            "label": "Layout",
+            "path_key": "layout_path",
+            "not_found": "LAYOUT_NOT_FOUND",
+            "changed": "LAYOUT_CHANGED_DURING_SNAPSHOT",
+            "failed": "LAYOUT_SNAPSHOT_FAILED",
+            "prefix": "klayout-layout-snapshot-",
+        },
     }
     if purpose not in profiles:
         raise AnalysisError(
             code="INVALID_SNAPSHOT_PURPOSE",
             message="Layout snapshot purpose is not supported.",
             details={"purpose": purpose},
-            next_action="Use the supported 'padset' or 'sample' snapshot purpose.",
+            next_action="Use the supported 'padset', 'sample', or 'layout' snapshot purpose.",
         )
     profile = profiles[purpose]
 
@@ -70,7 +79,10 @@ def create_layout_snapshot(
             next_action="Provide an existing GDS or OAS path.",
         )
 
-    with tempfile.TemporaryDirectory(prefix=profile["prefix"]) as temp_dir:
+    with tempfile.TemporaryDirectory(
+        prefix=profile["prefix"],
+        dir=temporary_root,
+    ) as temp_dir:
         try:
             before = source_path.stat()
             snapshot_path = Path(temp_dir) / source_path.name
@@ -145,10 +157,20 @@ def find_klayout_executable(explicit_path: str | None = None) -> Path:
         code="KLAYOUT_NOT_FOUND",
         message="KLayout executable was not found.",
         details={"checked": candidates},
-        next_action=(
-            "Set KLAYOUT_EXE to the KLayout executable. "
-            "In csh use: setenv KLAYOUT_EXE /path/to/klayout"
-        ),
+        next_action=_klayout_not_found_next_action(),
+    )
+
+
+def _klayout_not_found_next_action() -> str:
+    if os.name == "nt":
+        return (
+            "Set KLAYOUT_EXE to klayout_app.exe. In PowerShell use: "
+            "$env:KLAYOUT_EXE = 'C:\\Program Files\\KLayout\\klayout_app.exe'"
+        )
+    return (
+        "Set KLAYOUT_EXE to the KLayout executable. In sh/bash use: "
+        "export KLAYOUT_EXE=/path/to/klayout; in csh use: "
+        "setenv KLAYOUT_EXE /path/to/klayout"
     )
 
 
@@ -158,10 +180,14 @@ def run_klayout_worker(
     executable_path: str | None = None,
     timeout_seconds: float = 60.0,
     hidden_view: bool = False,
+    temporary_root: str | None = None,
 ) -> dict[str, Any]:
     executable = find_klayout_executable(executable_path)
     worker = Path(__file__).with_name("klayout_worker.py").resolve()
-    with tempfile.TemporaryDirectory(prefix="klayout-teg-mcp-") as temp_dir:
+    with tempfile.TemporaryDirectory(
+        prefix="klayout-teg-mcp-",
+        dir=temporary_root,
+    ) as temp_dir:
         request_path = Path(temp_dir) / "request.json"
         response_path = Path(temp_dir) / "response.json"
         request_path.write_text(json.dumps(dict(request)), encoding="utf-8")
@@ -176,12 +202,16 @@ def run_klayout_worker(
             "-rd",
             f"response_path={response_path}",
         ]
+        worker_environment = os.environ.copy()
+        if hidden_view and os.name != "nt":
+            worker_environment.setdefault("QT_QPA_PLATFORM", "offscreen")
         try:
             completed = subprocess.run(
                 command,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                env=worker_environment,
                 timeout=timeout_seconds,
                 check=False,
             )

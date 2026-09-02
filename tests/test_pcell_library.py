@@ -49,6 +49,11 @@ def test_generate_pcell_python_source_contains_contract() -> None:
     assert "pya.DBox(*shape[\"bbox_um\"])" in source
     assert "pya.Box(int(" not in source
     assert "PRODUCTION_READY = False" in source
+    assert "DutParameters(" in source
+    assert ").validate()" in source
+    assert 'raise ValueError(f"{exc.code}: {exc.message}")' in source
+    assert "self.w_um = 1.0" not in source
+    assert "self.l_um = 0.1" not in source
 
 
 def test_generate_pcell_python_source_with_layermap() -> None:

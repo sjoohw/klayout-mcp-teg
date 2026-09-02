@@ -1,0 +1,32 @@
+schema_version: 1
+name: generic_direct_measurement_reference
+approval_status: reference_only
+terminal_order_by_family_and_measurement:
+  transistor:
+    dc_4t: [G, D, S, B]
+  resistor:
+    direct_2t: [F+, F-]
+    kelvin_4t: [F+, F-, S+, S-]
+  capacitor:
+    capacitance_2t: [P, N]
+project_routing_defaults:
+  # This is a project/organization routing constraint, not a PDK rule.
+  max_width_um: null
+verification_environment:
+  # Engine availability is a company environment fact, not a PDK question.
+  drc: available
+  lvs: available
+  pex: available
+transistor_context_defaults:
+  fill_dut_window: true
+  measured_device_selection: balanced_central_region
+  default_measured_device_count: 1
+  measurement_edge_inset_um: 5.0
+  surrounding_device_routing: none
+  # Shared for electrically/process-compatible neighbors; N/P boundaries remain isolated.
+  diffusion_sharing: compatible_neighbors
+  default_fill_style: same_as_measured
+  allowed_fill_styles: [same_as_measured, standard_cell_like]
+  standard_cell_sequence: [nmos, pmos, pmos, nmos]
+  sequence_axis: x
+  standard_cell_height_required: true

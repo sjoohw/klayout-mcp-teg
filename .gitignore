@@ -8,7 +8,10 @@ __pycache__/
 .codex-remote-attachments/
 .skill-test/
 .sync-klayout-mcp-teg/
-artifacts/
+artifacts/*
+!artifacts/SLN001_kelvin_m1/
+artifacts/SLN001_kelvin_m1/*
+!artifacts/SLN001_kelvin_m1/SLN001_kelvin_m1_aligned_force_pad_joint_v15.gds
 automation/
 output/
 dist/

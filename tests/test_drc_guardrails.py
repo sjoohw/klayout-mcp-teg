@@ -177,6 +177,19 @@ def test_m1_connectivity_rejects_corner_only_contact() -> None:
     assert result["net_component_counts"] == {"gate": 2}
 
 
+def test_m1_connectivity_rejects_sub_tolerance_corner_artifact() -> None:
+    result = analyze_m1_connectivity(
+        [
+            {"net": "gate", "bbox_um": [0.0, 0.0, 1.0, 1.0]},
+            {"net": "gate", "bbox_um": [1.0 - 1e-12, 1.0, 2.0, 2.0]},
+        ],
+        tolerance_um=1e-9,
+    )
+
+    assert result["electrically_connected"] is False
+    assert result["net_component_counts"] == {"gate": 2}
+
+
 def test_m1_connectivity_accepts_positive_edge_contact() -> None:
     result = analyze_m1_connectivity(
         [

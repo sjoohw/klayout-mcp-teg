@@ -225,7 +225,12 @@ def analyze_m1_connectivity(
                     overlap_y = min(current_box.y2, candidate_box.y2) - max(
                         current_box.y1, candidate_box.y1
                     )
-                    has_positive_edge_overlap = overlap_x > 0.0 or overlap_y > 0.0
+                    # A corner-only touch is not a conductive join.  Ignore tiny
+                    # positive artifacts below the caller's explicit geometry
+                    # tolerance when deciding whether a shared edge has length.
+                    has_positive_edge_overlap = (
+                        overlap_x > tolerance_um or overlap_y > tolerance_um
+                    )
                     if (
                         dx <= tolerance_um
                         and dy <= tolerance_um

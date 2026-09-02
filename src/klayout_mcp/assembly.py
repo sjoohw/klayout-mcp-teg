@@ -1,4 +1,4 @@
-"""Assembly planner and parameter sweep schema for 21-site TEG layouts."""
+"""Assembly planner for a fixed 25-Pad TEG with selectable DUT sites."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ DUT_SITE_COUNT = DEFAULT_TEG_PROFILE.dut_site_count
 
 @dataclass(slots=True)
 class TegAssemblyPlan:
-    """Validated 21-site placement and parameter plan."""
+    """Validated placement and parameter plan over 21 available DUT sites."""
 
     padset_path: str
     layermap_path: str
@@ -27,6 +27,7 @@ class TegAssemblyPlan:
     export_static: bool
     dut_sweep: list[dict[str, Any]]
     total_sites: int = DUT_SITE_COUNT
+    selected_sites: tuple[int, ...] = tuple(range(1, DUT_SITE_COUNT + 1))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +40,8 @@ class TegAssemblyPlan:
             "output_gds_path": self.output_gds_path,
             "export_static": self.export_static,
             "total_sites": self.total_sites,
+            "selected_sites": list(self.selected_sites),
+            "assembled_sites": len(self.selected_sites),
             "dut_sweep_count": len(self.dut_sweep),
             "warning": (
                 "This plan uses synthetic process geometry and is not a production mask."
@@ -155,12 +158,18 @@ def plan_teg_dut_sequence(
         )
 
     site_entries = list(site_parameter_sets)
-    if len(site_entries) != DUT_SITE_COUNT:
+    if not site_entries or len(site_entries) > DUT_SITE_COUNT:
         raise AnalysisError(
             code="INVALID_SITE_PARAMETER_COUNT",
-            message=f"Expected 21 site parameter sets, but got {len(site_entries)}.",
-            details={"entry_count": len(site_entries)},
-            next_action="Provide exactly 21 site parameter dictionaries.",
+            message=(
+                "Provide between 1 and 21 explicit DUT site parameter sets for the "
+                "fixed 25-Pad profile."
+            ),
+            details={"entry_count": len(site_entries), "maximum_site_count": DUT_SITE_COUNT},
+            next_action=(
+                "Choose the occupied site numbers and provide one {site, parameters} "
+                "entry for each selected DUT."
+            ),
         )
 
     sites_seen: set[int] = set()
@@ -195,7 +204,7 @@ def plan_teg_dut_sequence(
                 code="INVALID_SITE_NUMBER",
                 message=f"Site number must be an integer between 1 and 21, got {site_num}.",
                 details={"entry": dict(entry)},
-                next_action="Provide each integer site number exactly once from 1 through 21.",
+                next_action="Choose a unique integer site number from 1 through 21.",
             )
         if site_num in sites_seen:
             raise AnalysisError(
@@ -255,46 +264,38 @@ def plan_teg_dut_sequence(
             },
         }
 
-    missing_parameter_sites = sorted(
-        set(range(1, DUT_SITE_COUNT + 1)).difference(entries_by_site)
-    )
-    if missing_parameter_sites:
-        raise AnalysisError(
-            code="SITE_PARAMETER_SET_MISMATCH",
-            message="Site parameters must contain every site number from 1 through 21.",
-            details={"missing_sites": missing_parameter_sites},
-            next_action="Provide exactly one parameter entry for each site.",
-        )
-
-    reference_topology = entries_by_site[1]["topology"]
+    selected_sites = sorted(entries_by_site)
+    reference_site = selected_sites[0]
+    reference_topology = entries_by_site[reference_site]["topology"]
     topology_mismatches = [
         {
             "site": site_num,
             "topology": entries_by_site[site_num]["topology"],
         }
-        for site_num in range(2, DUT_SITE_COUNT + 1)
+        for site_num in selected_sites[1:]
         if entries_by_site[site_num]["topology"] != reference_topology
-        or entries_by_site[site_num]["routed_indices"] != entries_by_site[1]["routed_indices"]
+        or entries_by_site[site_num]["routed_indices"]
+        != entries_by_site[reference_site]["routed_indices"]
     ]
     if topology_mismatches:
         raise AnalysisError(
             code="DUT_TOPOLOGY_MISMATCH",
-            message="All 21 sites must reuse one array topology and routed-index pattern.",
+            message="All selected DUT sites must reuse one array topology and routed-index pattern.",
             details={
-                "reference_site": 1,
+                "reference_site": reference_site,
                 "reference_topology": reference_topology,
                 "mismatches": topology_mismatches,
             },
             next_action=(
                 "Keep array rows, columns, pitches, and routed_device_count identical "
-                "across the 21-site sweep."
+                "across the selected DUT sites."
             ),
         )
 
     variant_ids: dict[str, str] = {}
     ordered_sites: list[dict[str, Any]] = []
     unresolved_landings: list[dict[str, Any]] = []
-    for site_num in range(1, DUT_SITE_COUNT + 1):
+    for site_num in selected_sites:
         slot = slots_by_site[site_num]
         normalized_params = entries_by_site[site_num]["parameters"]
         parameter_key = json.dumps(normalized_params, sort_keys=True, separators=(",", ":"))
@@ -344,11 +345,14 @@ def plan_teg_dut_sequence(
         "ok": True,
         "production_ready": False,
         "total_sites": DUT_SITE_COUNT,
+        "available_site_count": DUT_SITE_COUNT,
+        "selected_site_count": len(selected_sites),
+        "selected_sites": selected_sites,
         "variant_count": len(variant_ids),
         "all_landings_resolved": not unresolved_landings,
         "unresolved_landings": unresolved_landings,
         "shared_topology": reference_topology,
-        "shared_routed_indices": entries_by_site[1]["routed_indices"],
+        "shared_routed_indices": entries_by_site[reference_site]["routed_indices"],
         "site_plan": ordered_sites,
         "next_action": (
             "Resolve every reported S/D/G/B padset landing before production assembly."
@@ -366,6 +370,7 @@ def plan_teg_assembly(
     teg_name: str = "TEG_DUT_ARRAY_V1",
     export_static: bool = True,
     expected_site_count: int = DUT_SITE_COUNT,
+    dut_site_indices: Sequence[int] | None = None,
 ) -> TegAssemblyPlan:
     """Validate a non-production, explicitly opted-in conceptual export plan."""
 
@@ -434,25 +439,60 @@ def plan_teg_assembly(
             next_action="Provide a non-empty TEG name.",
         )
 
-    # 1. Validate sweep table count
+    # 1. Keep the 25-Pad/21-candidate-site contract while allowing a selected subset.
+    if dut_site_indices is None:
+        selected_sites = list(range(1, expected_site_count + 1))
+    else:
+        selected_sites = list(dut_site_indices)
+        invalid_sites = [
+            site
+            for site in selected_sites
+            if isinstance(site, bool)
+            or not isinstance(site, int)
+            or not 1 <= site <= expected_site_count
+        ]
+        if not selected_sites or invalid_sites:
+            raise AnalysisError(
+                code="INVALID_DUT_SITE_SELECTION",
+                message="DUT site selection must contain 1 to 21 valid site numbers.",
+                details={"selected_sites": selected_sites, "invalid_sites": invalid_sites},
+                next_action="Choose one or more integer sites between 1 and 21.",
+            )
+        if len(set(selected_sites)) != len(selected_sites):
+            raise AnalysisError(
+                code="DUPLICATE_DUT_SITE_SELECTION",
+                message="DUT site selection contains duplicate site numbers.",
+                details={"selected_sites": selected_sites},
+                next_action="Keep each selected DUT site exactly once.",
+            )
+    # 2. Validate sweep table count for the selected sites.
     sweep_list = list(dut_sweep)
     if len(sweep_list) == 1:
-        # Replicate single parameter configuration across all 21 sites
-        sweep_list = [dict(sweep_list[0]) for _ in range(expected_site_count)]
-    elif len(sweep_list) != expected_site_count:
+        sweep_list = [dict(sweep_list[0]) for _ in selected_sites]
+    elif len(sweep_list) != len(selected_sites):
         raise AnalysisError(
             code="SWEEP_COUNT_MISMATCH",
-            message=f"DUT sweep table must provide either 1 common config or exactly {expected_site_count} configs.",
-            details={"provided_count": len(sweep_list), "expected_count": expected_site_count},
-            next_action=f"Provide exactly {expected_site_count} parameter dictionaries.",
+            message=(
+                "DUT sweep table must provide either 1 common config or exactly one "
+                "config per selected DUT site."
+            ),
+            details={
+                "provided_count": len(sweep_list),
+                "selected_site_count": len(selected_sites),
+                "selected_sites": selected_sites,
+            },
+            next_action=(
+                f"Provide 1 or {len(selected_sites)} parameter dictionaries for the "
+                "selected sites."
+            ),
         )
 
-    # 2. Validate individual DUT parameter sets
+    # 3. Validate individual DUT parameter sets.
     supported_parameters = {
         item.name for item in fields(DutParameters)
     } - {"device_window_um", "routing_boundary_um"}
     validated_sweep: list[dict[str, Any]] = []
-    for site_idx, item in enumerate(sweep_list, start=1):
+    for site_idx, item in zip(selected_sites, sweep_list):
         if not isinstance(item, dict):
             raise AnalysisError(
                 code="INVALID_SITE_PARAMETER",
@@ -502,4 +542,5 @@ def plan_teg_assembly(
         export_static=export_static,
         dut_sweep=validated_sweep,
         total_sites=expected_site_count,
+        selected_sites=tuple(selected_sites),
     )

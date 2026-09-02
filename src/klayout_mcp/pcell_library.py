@@ -18,6 +18,7 @@ from .dut_geometry import (
     build_dut_geometry,
     build_terminal_contract,
 )
+from .design_contract import validate_orthogonal_m1_shapes
 from .errors import AnalysisError
 from .geometry import Box, Point
 from .selection import _balanced_target_points, _unit_centers, select_routed_units
@@ -39,6 +40,7 @@ def _standalone_geometry_core_source() -> str:
         select_routed_units,
         _default_device_window,
         _default_routing_boundary,
+        validate_orthogonal_m1_shapes,
         DutParameters,
         build_terminal_contract,
         DutGeometryResult,
@@ -96,17 +98,23 @@ def generate_pcell_python_source(layermap: Mapping[str, Any]) -> str:
     return f'''# $autorun
 # NON-PRODUCTION CONCEPTUAL PCELL. DO NOT USE AS A FABRICATION MASK.
 # Process geometry and electrical connectivity are not verified.
+# M1 routing is horizontal/vertical only; diagonal routing is forbidden.
+# W/L below are device-specific transistor parameters, not generic short/long axes.
 # KLayout Python PCell Library for TEG DUT Transistor Arrays
 from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Any, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import pya
 
 PRODUCTION_READY = False
-DUT_PCELL_CONTRACT_VERSION = 1
+DUT_PCELL_CONTRACT_VERSION = 2
+DIMENSION_SEMANTICS = "device_specific_w_l"
+ROUTING_STYLE = "orthogonal_only"
+DIAGONAL_ROUTING_ALLOWED = False
+PARASITIC_RESISTANCE_OPTIMIZED = False
 
 {geometry_core_source}
 
@@ -134,27 +142,20 @@ class DutTransistorArrayPCell(pya.PCellDeclarationHelper):
         return f"DutArray(W={{self.w_um}}, L={{self.l_um}}, Rows={{self.array_rows}}, Cols={{self.array_cols}})"
 
     def coerce_parameters_impl(self):
-        if self.w_um <= 0:
-            self.w_um = 1.0
-        if self.l_um <= 0:
-            self.l_um = 0.1
-        if self.array_rows < 1:
-            self.array_rows = 1
-        if self.array_cols < 1:
-            self.array_cols = 1
-        if self.pitch_x_um <= 0:
-            self.pitch_x_um = 2.0
-        if self.pitch_y_um <= 0:
-            self.pitch_y_um = 2.0
-        max_units = self.array_rows * self.array_cols
-        if self.routed_device_count > max_units:
-            self.routed_device_count = max_units
-        if self.routed_device_count < 1:
-            self.routed_device_count = 1
-        if self.m1_width_um <= 0:
-            self.m1_width_um = 0.4
-        if self.m1_overlap_um <= 0:
-            self.m1_overlap_um = 0.2
+        try:
+            DutParameters(
+                w_um=self.w_um,
+                l_um=self.l_um,
+                array_rows=self.array_rows,
+                array_cols=self.array_cols,
+                pitch_x_um=self.pitch_x_um,
+                pitch_y_um=self.pitch_y_um,
+                routed_device_count=self.routed_device_count,
+                m1_width_um=self.m1_width_um,
+                m1_overlap_um=self.m1_overlap_um,
+            ).validate()
+        except AnalysisError as exc:
+            raise ValueError(f"{{exc.code}}: {{exc.message}}") from exc
 
     def produce_impl(self):
         geometry = build_dut_geometry(
@@ -168,7 +169,8 @@ class DutTransistorArrayPCell(pya.PCellDeclarationHelper):
                 routed_device_count=self.routed_device_count,
                 m1_width_um=self.m1_width_um,
                 m1_overlap_um=self.m1_overlap_um,
-            )
+            ),
+            dbu_um=self.layout.dbu,
         )
 
         for box_um in geometry.active_boxes_um:
@@ -261,27 +263,20 @@ def register_teg_library(layers: Mapping[str, tuple[int, int]]) -> bool:
             return f"DutArray(W={self.w_um}, L={self.l_um})"
 
         def coerce_parameters_impl(self):
-            if self.w_um <= 0:
-                self.w_um = 1.0
-            if self.l_um <= 0:
-                self.l_um = 0.1
-            if self.array_rows < 1:
-                self.array_rows = 1
-            if self.array_cols < 1:
-                self.array_cols = 1
-            if self.pitch_x_um <= 0:
-                self.pitch_x_um = 2.0
-            if self.pitch_y_um <= 0:
-                self.pitch_y_um = 2.0
-            max_units = self.array_rows * self.array_cols
-            if self.routed_device_count > max_units:
-                self.routed_device_count = max_units
-            if self.routed_device_count < 1:
-                self.routed_device_count = 1
-            if self.m1_width_um <= 0:
-                self.m1_width_um = 0.4
-            if self.m1_overlap_um <= 0:
-                self.m1_overlap_um = 0.2
+            try:
+                DutParameters(
+                    w_um=self.w_um,
+                    l_um=self.l_um,
+                    array_rows=self.array_rows,
+                    array_cols=self.array_cols,
+                    pitch_x_um=self.pitch_x_um,
+                    pitch_y_um=self.pitch_y_um,
+                    routed_device_count=self.routed_device_count,
+                    m1_width_um=self.m1_width_um,
+                    m1_overlap_um=self.m1_overlap_um,
+                ).validate()
+            except AnalysisError as exc:
+                raise ValueError(f"{exc.code}: {exc.message}") from exc
 
         def produce_impl(self):
             geometry = build_dut_geometry(
@@ -295,7 +290,8 @@ def register_teg_library(layers: Mapping[str, tuple[int, int]]) -> bool:
                     routed_device_count=self.routed_device_count,
                     m1_width_um=self.m1_width_um,
                     m1_overlap_um=self.m1_overlap_um,
-                )
+                ),
+                dbu_um=self.layout.dbu,
             )
 
             for box_um in geometry.active_boxes_um:

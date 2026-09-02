@@ -1,0 +1,639 @@
+{
+  "hierarchy_style": {
+    "flattening_performed": false,
+    "mirrored_instance_count": 0,
+    "reused_top_child_cells": [
+      {
+        "cell": "FRAMED_MESH_PAD_40UM",
+        "direct_top_instance_count": 25
+      }
+    ],
+    "rotation_counts": {
+      "0": 31,
+      "180": 0,
+      "270": 0,
+      "90": 0
+    },
+    "top_child_instance_counts": [
+      {
+        "cell": "FRAMED_MESH_PAD_40UM",
+        "count": 25
+      },
+      {
+        "cell": "KELVIN_K1_W024NM_L2000NM",
+        "count": 1
+      },
+      {
+        "cell": "KELVIN_K2_W048NM_L3000NM",
+        "count": 1
+      },
+      {
+        "cell": "KELVIN_K3_W100NM_L3000NM",
+        "count": 1
+      },
+      {
+        "cell": "KELVIN_K4_W100NM_L2000NM",
+        "count": 1
+      },
+      {
+        "cell": "KELVIN_K5_W048NM_L2000NM",
+        "count": 1
+      },
+      {
+        "cell": "KELVIN_K6_W024NM_L3000NM",
+        "count": 1
+      }
+    ],
+    "top_direct_instance_count": 31
+  },
+  "inference_boundaries": {
+    "design_rule_inference_performed": false,
+    "electrical_performance_inference_performed": false,
+    "net_or_terminal_inference_performed": false,
+    "role_inference_performed": false,
+    "semantic_layer_roles_only_from_supplied_layermap": true,
+    "style_values_are_observed_geometry_not_generation_constraints": true
+  },
+  "kind": "ExtractedLayoutStyleProfile",
+  "label_style": {
+    "recursive_text_count": 1,
+    "sample_limit": 50,
+    "sample_strings": [
+      "SLN001"
+    ],
+    "unique_text_count": 1
+  },
+  "layer_styles": [
+    {
+      "box_orientation_counts": {
+        "horizontal": 1475,
+        "square": 36,
+        "vertical": 3125
+      },
+      "datatype": 0,
+      "geometry_shape_count": 4636,
+      "layer": 15,
+      "layer_token": "15/0",
+      "mapped_roles": [
+        "m1"
+      ],
+      "merged_topology": {
+        "area_um2": 26713.979,
+        "bbox_fill_ratio": 0.2962952417923691,
+        "bbox_um": [
+          20.0,
+          7.0,
+          1980.0,
+          53.0
+        ],
+        "component_count": 7,
+        "hole_count": 50488
+      },
+      "non_manhattan_shape_count": 0,
+      "observed_box_dimensions": {
+        "heights_um": [
+          {
+            "count": 1505,
+            "value_um": 0.3
+          },
+          {
+            "count": 1356,
+            "value_um": 5.3
+          },
+          {
+            "count": 1025,
+            "value_um": 39.4
+          },
+          {
+            "count": 468,
+            "value_um": 6.3
+          },
+          {
+            "count": 84,
+            "value_um": 2.0
+          },
+          {
+            "count": 72,
+            "value_um": 1.15
+          },
+          {
+            "count": 72,
+            "value_um": 13.70025
+          },
+          {
+            "count": 24,
+            "value_um": 1.3
+          },
+          {
+            "count": 24,
+            "value_um": 3.3
+          },
+          {
+            "count": 2,
+            "value_um": 0.024
+          },
+          {
+            "count": 2,
+            "value_um": 0.048
+          },
+          {
+            "count": 2,
+            "value_um": 0.1
+          }
+        ],
+        "histogram_limit": 12,
+        "long_sides_um": [
+          {
+            "count": 2000,
+            "value_um": 39.4
+          },
+          {
+            "count": 1524,
+            "value_um": 5.3
+          },
+          {
+            "count": 468,
+            "value_um": 6.3
+          },
+          {
+            "count": 171,
+            "value_um": 2.0
+          },
+          {
+            "count": 72,
+            "value_um": 1.15
+          },
+          {
+            "count": 72,
+            "value_um": 13.70025
+          },
+          {
+            "count": 72,
+            "value_um": 138.0
+          },
+          {
+            "count": 50,
+            "value_um": 40.0
+          },
+          {
+            "count": 48,
+            "value_um": 1.3
+          },
+          {
+            "count": 48,
+            "value_um": 3.3
+          },
+          {
+            "count": 36,
+            "value_um": 0.3
+          },
+          {
+            "count": 36,
+            "value_um": 12.35025
+          }
+        ],
+        "short_sides_um": [
+          {
+            "count": 4630,
+            "value_um": 0.3
+          },
+          {
+            "count": 2,
+            "value_um": 0.024
+          },
+          {
+            "count": 2,
+            "value_um": 0.048
+          },
+          {
+            "count": 2,
+            "value_um": 0.1
+          }
+        ],
+        "values_are_observations_not_design_rules": true,
+        "widths_um": [
+          {
+            "count": 3161,
+            "value_um": 0.3
+          },
+          {
+            "count": 975,
+            "value_um": 39.4
+          },
+          {
+            "count": 168,
+            "value_um": 5.3
+          },
+          {
+            "count": 87,
+            "value_um": 2.0
+          },
+          {
+            "count": 72,
+            "value_um": 138.0
+          },
+          {
+            "count": 50,
+            "value_um": 40.0
+          },
+          {
+            "count": 36,
+            "value_um": 12.35025
+          },
+          {
+            "count": 36,
+            "value_um": 12.85025
+          },
+          {
+            "count": 24,
+            "value_um": 1.3
+          },
+          {
+            "count": 24,
+            "value_um": 3.3
+          },
+          {
+            "count": 3,
+            "value_um": 3.0
+          }
+        ]
+      },
+      "orthogonal_geometry_verified": true,
+      "recursive_shape_count": 4637,
+      "shape_counts": {
+        "box": 4636,
+        "edge": 0,
+        "other": 0,
+        "path": 0,
+        "point": 0,
+        "polygon": 0,
+        "text": 1
+      }
+    },
+    {
+      "box_orientation_counts": {
+        "horizontal": 1,
+        "square": 0,
+        "vertical": 0
+      },
+      "datatype": 20,
+      "geometry_shape_count": 1,
+      "layer": 62,
+      "layer_token": "62/20",
+      "mapped_roles": [],
+      "merged_topology": {
+        "area_um2": 108000.0,
+        "bbox_fill_ratio": 1.0,
+        "bbox_um": [
+          0.0,
+          0.0,
+          2000.0,
+          54.0
+        ],
+        "component_count": 1,
+        "hole_count": 0
+      },
+      "non_manhattan_shape_count": 0,
+      "observed_box_dimensions": {
+        "heights_um": [
+          {
+            "count": 1,
+            "value_um": 54.0
+          }
+        ],
+        "histogram_limit": 12,
+        "long_sides_um": [
+          {
+            "count": 1,
+            "value_um": 2000.0
+          }
+        ],
+        "short_sides_um": [
+          {
+            "count": 1,
+            "value_um": 54.0
+          }
+        ],
+        "values_are_observations_not_design_rules": true,
+        "widths_um": [
+          {
+            "count": 1,
+            "value_um": 2000.0
+          }
+        ]
+      },
+      "orthogonal_geometry_verified": true,
+      "recursive_shape_count": 1,
+      "shape_counts": {
+        "box": 1,
+        "edge": 0,
+        "other": 0,
+        "path": 0,
+        "point": 0,
+        "polygon": 0,
+        "text": 0
+      }
+    }
+  ],
+  "layout": {
+    "cell_count": 15,
+    "dbu_um": 0.00025,
+    "format": "gds",
+    "klayout_version": "KLayout 0.30.10",
+    "top_bbox_um": [
+      0.0,
+      0.0,
+      2000.0,
+      54.0
+    ],
+    "top_cell": "SLN001_PADSET",
+    "top_cells": [
+      "SLN001_PADSET"
+    ]
+  },
+  "production_ready": false,
+  "reference_style_descriptors": [
+    {
+      "category": "hierarchy",
+      "description": "Observed top-level hierarchy reuse and instance orientation.",
+      "descriptor_id": "observed-hierarchy-reuse",
+      "parameters": {
+        "flattening_performed": false,
+        "mirrored_instance_count": 0,
+        "reused_top_child_cells": [
+          {
+            "cell": "FRAMED_MESH_PAD_40UM",
+            "direct_top_instance_count": 25
+          }
+        ],
+        "rotation_counts": {
+          "0": 31,
+          "180": 0,
+          "270": 0,
+          "90": 0
+        },
+        "top_direct_instance_count": 31
+      }
+    },
+    {
+      "category": "layer_geometry",
+      "description": "Observed geometry style for GDS layer 15/0.",
+      "descriptor_id": "observed-layer-15-0",
+      "parameters": {
+        "box_orientation_counts": {
+          "horizontal": 1475,
+          "square": 36,
+          "vertical": 3125
+        },
+        "layer_token": "15/0",
+        "mapped_roles": [
+          "m1"
+        ],
+        "merged_topology": {
+          "area_um2": 26713.979,
+          "bbox_fill_ratio": 0.2962952417923691,
+          "bbox_um": [
+            20.0,
+            7.0,
+            1980.0,
+            53.0
+          ],
+          "component_count": 7,
+          "hole_count": 50488
+        },
+        "observed_box_dimensions": {
+          "heights_um": [
+            {
+              "count": 1505,
+              "value_um": 0.3
+            },
+            {
+              "count": 1356,
+              "value_um": 5.3
+            },
+            {
+              "count": 1025,
+              "value_um": 39.4
+            },
+            {
+              "count": 468,
+              "value_um": 6.3
+            },
+            {
+              "count": 84,
+              "value_um": 2.0
+            },
+            {
+              "count": 72,
+              "value_um": 1.15
+            },
+            {
+              "count": 72,
+              "value_um": 13.70025
+            },
+            {
+              "count": 24,
+              "value_um": 1.3
+            },
+            {
+              "count": 24,
+              "value_um": 3.3
+            },
+            {
+              "count": 2,
+              "value_um": 0.024
+            },
+            {
+              "count": 2,
+              "value_um": 0.048
+            },
+            {
+              "count": 2,
+              "value_um": 0.1
+            }
+          ],
+          "histogram_limit": 12,
+          "long_sides_um": [
+            {
+              "count": 2000,
+              "value_um": 39.4
+            },
+            {
+              "count": 1524,
+              "value_um": 5.3
+            },
+            {
+              "count": 468,
+              "value_um": 6.3
+            },
+            {
+              "count": 171,
+              "value_um": 2.0
+            },
+            {
+              "count": 72,
+              "value_um": 1.15
+            },
+            {
+              "count": 72,
+              "value_um": 13.70025
+            },
+            {
+              "count": 72,
+              "value_um": 138.0
+            },
+            {
+              "count": 50,
+              "value_um": 40.0
+            },
+            {
+              "count": 48,
+              "value_um": 1.3
+            },
+            {
+              "count": 48,
+              "value_um": 3.3
+            },
+            {
+              "count": 36,
+              "value_um": 0.3
+            },
+            {
+              "count": 36,
+              "value_um": 12.35025
+            }
+          ],
+          "short_sides_um": [
+            {
+              "count": 4630,
+              "value_um": 0.3
+            },
+            {
+              "count": 2,
+              "value_um": 0.024
+            },
+            {
+              "count": 2,
+              "value_um": 0.048
+            },
+            {
+              "count": 2,
+              "value_um": 0.1
+            }
+          ],
+          "values_are_observations_not_design_rules": true,
+          "widths_um": [
+            {
+              "count": 3161,
+              "value_um": 0.3
+            },
+            {
+              "count": 975,
+              "value_um": 39.4
+            },
+            {
+              "count": 168,
+              "value_um": 5.3
+            },
+            {
+              "count": 87,
+              "value_um": 2.0
+            },
+            {
+              "count": 72,
+              "value_um": 138.0
+            },
+            {
+              "count": 50,
+              "value_um": 40.0
+            },
+            {
+              "count": 36,
+              "value_um": 12.35025
+            },
+            {
+              "count": 36,
+              "value_um": 12.85025
+            },
+            {
+              "count": 24,
+              "value_um": 1.3
+            },
+            {
+              "count": 24,
+              "value_um": 3.3
+            },
+            {
+              "count": 3,
+              "value_um": 3.0
+            }
+          ]
+        },
+        "orthogonal_geometry_verified": true
+      }
+    },
+    {
+      "category": "layer_geometry",
+      "description": "Observed geometry style for GDS layer 62/20.",
+      "descriptor_id": "observed-layer-62-20",
+      "parameters": {
+        "box_orientation_counts": {
+          "horizontal": 1,
+          "square": 0,
+          "vertical": 0
+        },
+        "layer_token": "62/20",
+        "mapped_roles": [],
+        "merged_topology": {
+          "area_um2": 108000.0,
+          "bbox_fill_ratio": 1.0,
+          "bbox_um": [
+            0.0,
+            0.0,
+            2000.0,
+            54.0
+          ],
+          "component_count": 1,
+          "hole_count": 0
+        },
+        "observed_box_dimensions": {
+          "heights_um": [
+            {
+              "count": 1,
+              "value_um": 54.0
+            }
+          ],
+          "histogram_limit": 12,
+          "long_sides_um": [
+            {
+              "count": 1,
+              "value_um": 2000.0
+            }
+          ],
+          "short_sides_um": [
+            {
+              "count": 1,
+              "value_um": 54.0
+            }
+          ],
+          "values_are_observations_not_design_rules": true,
+          "widths_um": [
+            {
+              "count": 1,
+              "value_um": 2000.0
+            }
+          ]
+        },
+        "orthogonal_geometry_verified": true
+      }
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "layermap_sha256": "574e95ae68c8e063cf47c75c5ca9fcc284ac12637953dd403b88e917157dcb87",
+    "layout_sha256": "7386c06835080c436839980e989903e71faf1d792610c4142fac5156cadb2d28",
+    "runtime_paths_in_profile": false,
+    "size_bytes": 81108
+  },
+  "style_profile_sha256": "80ad7f642f09f71b9d82f0c65631f25fff0670af4ed05937c16224aed4f7947f"
+}

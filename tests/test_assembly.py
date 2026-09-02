@@ -12,6 +12,9 @@ from klayout_mcp.klayout_adapter import find_klayout_executable
 from klayout_mcp.server import analyze_padset, assemble_teg
 
 
+DEVICE_SPECIFIC_W_L = "device_specific_w_l"
+
+
 def _sequence_slots(*, resolved: bool = False) -> list[dict]:
     status = "resolved" if resolved else "unresolved"
     return [
@@ -68,6 +71,42 @@ def test_plan_teg_assembly_sweep_count_mismatch(tmp_path) -> None:
             output_gds_path="out.gds",
         )
     assert exc.value.code == "SWEEP_COUNT_MISMATCH"
+
+
+def test_plan_teg_assembly_selects_variable_dut_count_on_fixed_padset(tmp_path) -> None:
+    padset_file = tmp_path / "padset.gds"
+    padset_file.write_bytes(b"dummy")
+    layermap_file = tmp_path / "layers.yaml"
+    layermap_file.write_text("layers:\n  m1: [1, 0]\n", encoding="utf-8")
+
+    plan = plan_teg_assembly(
+        padset_path=str(padset_file),
+        layermap_path=str(layermap_file),
+        dut_sweep=[{"l_um": 0.12}],
+        dut_site_indices=[2, 10, 20],
+        output_gds_path=str(tmp_path / "selected.gds"),
+    )
+
+    assert plan.total_sites == 21
+    assert plan.selected_sites == (2, 10, 20)
+    assert [item["site"] for item in plan.dut_sweep] == [2, 10, 20]
+
+
+def test_sequence_plan_accepts_selected_dut_subset() -> None:
+    result = plan_teg_dut_sequence(
+        _sequence_slots(resolved=True),
+        [
+            {"site": 3, "parameters": {"l_um": 0.1}},
+            {"site": 11, "parameters": {"l_um": 0.2}},
+            {"site": 19, "parameters": {"l_um": 0.1}},
+        ],
+    )
+
+    assert result["available_site_count"] == 21
+    assert result["selected_site_count"] == 3
+    assert result["selected_sites"] == [3, 11, 19]
+    assert [item["site"] for item in result["site_plan"]] == [3, 11, 19]
+    assert result["variant_count"] == 2
 
 
 def test_plan_teg_dut_sequence_validation() -> None:
@@ -312,6 +351,7 @@ def test_conceptual_assembly_roundtrip_is_truthful_and_non_destructive(
         str(output),
         [{"l_um": 0.12}],
         confirm_conceptual_export=True,
+        dimension_semantics=DEVICE_SPECIFIC_W_L,
         klayout_executable=str(executable),
     )
 
@@ -362,11 +402,32 @@ def test_conceptual_assembly_roundtrip_is_truthful_and_non_destructive(
         str(output),
         [{"l_um": 0.12}],
         confirm_conceptual_export=True,
+        dimension_semantics=DEVICE_SPECIFIC_W_L,
         klayout_executable=str(executable),
     )
     assert repeated["ok"] is False
     assert repeated["code"] == "OUTPUT_ALREADY_EXISTS"
     assert output.read_bytes() == output_before
+
+    selected_output = tmp_path / "conceptual-teg-selected.gds"
+    selected = assemble_teg(
+        str(padset),
+        str(layermap),
+        str(selected_output),
+        [{"l_um": 0.12}],
+        dut_site_indices=[2, 10, 20],
+        export_static=False,
+        confirm_conceptual_export=True,
+        dimension_semantics=DEVICE_SPECIFIC_W_L,
+        klayout_executable=str(executable),
+    )
+
+    assert selected["ok"] is True
+    assert selected["total_sites"] == 21
+    assert selected["assembled_sites"] == 3
+    assert selected["selected_sites"] == [2, 10, 20]
+    assert selected["direct_instance_count"] == 28
+    assert [item["site"] for item in selected["site_variants"]] == [2, 10, 20]
 
     editable_output = tmp_path / "conceptual-teg-editable.gds"
     three_variant_sweep = [
@@ -380,6 +441,7 @@ def test_conceptual_assembly_roundtrip_is_truthful_and_non_destructive(
         three_variant_sweep,
         export_static=False,
         confirm_conceptual_export=True,
+        dimension_semantics=DEVICE_SPECIFIC_W_L,
         klayout_executable=str(executable),
     )
 
