@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 import uuid
@@ -107,6 +108,7 @@ class TechnologyAdapterRegistry:
         if self.root is not None:
             (self.root / "packages").mkdir(parents=True, exist_ok=True)
             (self.root / "lifecycle").mkdir(parents=True, exist_ok=True)
+            (self.root / "lifecycle_heads").mkdir(parents=True, exist_ok=True)
             (self.root / "snapshots").mkdir(parents=True, exist_ok=True)
             self._load_from_disk()
 
@@ -164,7 +166,7 @@ class TechnologyAdapterRegistry:
     @staticmethod
     def _order_lifecycle_chain(
         records: list[tuple[str, dict[str, Any]]], *, package_sha256: str
-    ) -> list[dict[str, Any]]:
+    ) -> list[tuple[str, dict[str, Any]]]:
         legacy = [(digest, record) for digest, record in records if record.get("schema_version") == 1]
         chained = [(digest, record) for digest, record in records if record.get("schema_version") == 2]
         unsupported = [record.get("schema_version") for _, record in records if record.get("schema_version") not in {1, 2}]
@@ -227,7 +229,80 @@ class TechnologyAdapterRegistry:
                 details={"package_sha256": package_sha256, "revoked_sequence": revoked_indexes[0] + 1},
                 next_action="Quarantine the invalid post-revocation lifecycle records.",
             )
-        return ordered
+        return ordered_pairs
+
+    @staticmethod
+    def _read_lifecycle_head(path: Path) -> dict[str, Any]:
+        try:
+            head = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_HEAD_INVALID",
+                "A lifecycle trusted-head document is unreadable.",
+                details={"path": str(path), "error_type": type(exc).__name__},
+                next_action="Restore the trusted lifecycle head before starting the registry.",
+            )
+        expected_fields = {
+            "schema_version",
+            "artifact_type",
+            "package_sha256",
+            "sequence",
+            "record_sha256",
+        }
+        if (
+            not isinstance(head, dict)
+            or set(head) != expected_fields
+            or head.get("schema_version") != 1
+            or head.get("artifact_type") != "TechnologyAdapterLifecycleHead"
+            or not SHA256_PATTERN.fullmatch(str(head.get("package_sha256", "")))
+            or isinstance(head.get("sequence"), bool)
+            or not isinstance(head.get("sequence"), int)
+            or head.get("sequence", 0) < 1
+            or not SHA256_PATTERN.fullmatch(str(head.get("record_sha256", "")))
+        ):
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_HEAD_INVALID",
+                "A lifecycle trusted-head document does not match its strict schema.",
+                details={"path": str(path)},
+                next_action="Restore the exact trusted lifecycle head before starting the registry.",
+            )
+        if path.stem != head["package_sha256"]:
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_HEAD_INVALID",
+                "The lifecycle trusted-head filename does not match its package hash.",
+                details={
+                    "path": str(path),
+                    "expected": path.stem,
+                    "received": head["package_sha256"],
+                },
+                next_action="Restore the trusted head under the exact package SHA-256 filename.",
+            )
+        return head
+
+    def _write_lifecycle_head(
+        self, *, package_sha256: str, sequence: int, record_sha256: str
+    ) -> None:
+        assert self.root is not None
+        head = {
+            "schema_version": 1,
+            "artifact_type": "TechnologyAdapterLifecycleHead",
+            "package_sha256": package_sha256,
+            "sequence": sequence,
+            "record_sha256": record_sha256,
+        }
+        directory = self.root / "lifecycle_heads"
+        final = directory / f"{package_sha256}.json"
+        temporary = directory / (
+            f"{publication_staging_prefix('lifecycle-head')}{uuid.uuid4().hex}"
+        )
+        try:
+            with temporary.open("xb") as handle:
+                handle.write(canonical_json_bytes(head))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, final)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _load_from_disk(self) -> None:
         assert self.root is not None
@@ -257,6 +332,18 @@ class TechnologyAdapterRegistry:
 
         lifecycle_records: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         registered_hashes = {entry[0] for entry in self._packages.values()}
+        lifecycle_heads: dict[str, dict[str, Any]] = {}
+        for path in sorted((self.root / "lifecycle_heads").glob("*.json")):
+            head = self._read_lifecycle_head(path)
+            package_sha256 = head["package_sha256"]
+            if package_sha256 not in registered_hashes:
+                _fail(
+                    "TECH_ADAPTER_LIFECYCLE_HEAD_PACKAGE_MISSING",
+                    "A lifecycle trusted head refers to an unavailable package.",
+                    details={"path": str(path), "package_sha256": package_sha256},
+                    next_action="Restore the exact package referenced by the trusted head.",
+                )
+            lifecycle_heads[package_sha256] = head
         for path in sorted((self.root / "lifecycle").glob("*.json")):
             record = self._read_persisted_document(path)
             package_sha256 = record.get("package_sha256")
@@ -278,11 +365,52 @@ class TechnologyAdapterRegistry:
             lifecycle_records.setdefault(package_sha256, []).append((path.stem, record))
         self._lifecycle = []
         for package_sha256 in sorted(lifecycle_records):
-            self._lifecycle.extend(
-                self._order_lifecycle_chain(
-                    lifecycle_records[package_sha256],
-                    package_sha256=package_sha256,
+            ordered_pairs = self._order_lifecycle_chain(
+                lifecycle_records[package_sha256],
+                package_sha256=package_sha256,
+            )
+            head = lifecycle_heads.get(package_sha256)
+            last_digest, last_record = ordered_pairs[-1]
+            last_sequence = int(last_record.get("sequence", 1))
+            if head is None:
+                _fail(
+                    "TECH_ADAPTER_LIFECYCLE_HEAD_MISSING",
+                    "Persisted lifecycle evidence has no trusted final head.",
+                    details={
+                        "package_sha256": package_sha256,
+                        "last_sequence": last_sequence,
+                        "last_record_sha256": last_digest,
+                    },
+                    next_action="Migrate and anchor the reviewed lifecycle chain before starting the registry.",
                 )
+            if (
+                head["sequence"] != last_sequence
+                or head["record_sha256"] != last_digest
+            ):
+                _fail(
+                    "TECH_ADAPTER_LIFECYCLE_HEAD_MISMATCH",
+                    "The lifecycle chain no longer reaches its trusted final head.",
+                    details={
+                        "package_sha256": package_sha256,
+                        "expected_sequence": head["sequence"],
+                        "received_sequence": last_sequence,
+                        "expected_record_sha256": head["record_sha256"],
+                        "received_record_sha256": last_digest,
+                    },
+                    next_action="Stop adapter use and restore the missing or modified lifecycle record.",
+                )
+            self._lifecycle.extend(record for _, record in ordered_pairs)
+        heads_without_records = sorted(set(lifecycle_heads).difference(lifecycle_records))
+        if heads_without_records:
+            package_sha256 = heads_without_records[0]
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_HEAD_RECORD_MISSING",
+                "A trusted lifecycle head exists but its lifecycle chain is missing.",
+                details={
+                    "package_sha256": package_sha256,
+                    "head": lifecycle_heads[package_sha256],
+                },
+                next_action="Stop adapter use and restore the complete lifecycle chain.",
             )
 
     @staticmethod
@@ -433,6 +561,11 @@ class TechnologyAdapterRegistry:
         record_sha256 = canonical_sha256(record)
         if self.root is not None:
             self._publish_document(self.root / "lifecycle", record_sha256, record)
+            self._write_lifecycle_head(
+                package_sha256=package_sha256,
+                sequence=record["sequence"],
+                record_sha256=record_sha256,
+            )
         if not any(canonical_sha256(existing) == record_sha256 for existing in self._lifecycle):
             self._lifecycle.append(record)
             self._lifecycle.sort(
@@ -528,6 +661,7 @@ class TechnologyAdapterRegistry:
             "wildcard_or_alias_fallback": False,
             "append_only_packages": True,
             "append_only_lifecycle": True,
+            "lifecycle_trusted_head_required": self.root is not None,
             "registered_package_count": len(self._packages),
             "snapshot_content_addressed": True,
         }

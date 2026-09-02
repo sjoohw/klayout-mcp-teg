@@ -224,6 +224,11 @@ fitting 계산에서 제외하지만 같은 source GDS와 metadata에 남는다.
 `kind=integer` 값은 실제 정수여야 한다. 각 terminal은 존재하는 semantic `layer_role`을 명시하고,
 각 DUT의 topology는 corpus topology와 정확히 같아야 한다.
 
+각 parameter에 값이 두 개 이상 있다는 것만으로 충분하지 않다. Training DOE의 normalized design-matrix
+rank가 parameter 수와 같아야 하고, 각 parameter는 다른 parameter를 같은 값으로 둔 비교 DUT가 있어야
+한다. 부족한 경우 issue와 witness가 `identifiability_evidence`에 영구 저장되며 score와 candidate 생성은
+`DUT_CORPUS_IDENTIFIABILITY_BLOCKED`로 중단된다.
+
 같은 parameter row인데 geometry가 다르면 `onboard_transistor_corpus`는 어느 reference DUT를 따를지
 묻는다. 사용자의 결정은 immutable resolution artifact에 기록된다. 관측된 invariant metric은
 drawing-style 후보이며 공정 규칙으로 승격되지 않는다.
@@ -236,6 +241,9 @@ technology/device/topology 결속을 다시 확인한다. 이 검사는 변조·
 compiler 실행 receipt를 대신하지 않는다. 통과한 candidate도
 `candidate_scored_logical_validation_not_foundry_qualified` 상태다. 현재 corpus workflow는 CPP와 연계된 Gate/Active/
 Contact/implant/terminal dependency recipe를 자동 합성하거나 callable transistor PCell을 만들지 않는다.
+
+`exact_fingerprint_required=true`이면 fingerprint 불일치는 score threshold가 0이어도 per-DUT hard-fail이다.
+Reproduced GDS DBU도 corpus DBU와 도형 비교 전에 정확히 같아야 하며, 다르면 scorecard를 만들지 않는다.
 
 ## PCellizer
 

@@ -269,6 +269,220 @@ def _coverage(schema, records):
     }
 
 
+def _matrix_rank(rows: list[list[float]], *, tolerance: float = 1e-12) -> int:
+    """Return deterministic numeric rank for the small normalized DOE matrix."""
+
+    if not rows:
+        return 0
+    matrix = [list(map(float, row)) for row in rows]
+    row_count = len(matrix)
+    column_count = len(matrix[0]) if matrix else 0
+    rank = 0
+    for column in range(column_count):
+        pivot = max(range(rank, row_count), key=lambda index: abs(matrix[index][column]))
+        if abs(matrix[pivot][column]) <= tolerance:
+            continue
+        matrix[rank], matrix[pivot] = matrix[pivot], matrix[rank]
+        pivot_value = matrix[rank][column]
+        matrix[rank] = [value / pivot_value for value in matrix[rank]]
+        for row_index in range(row_count):
+            if row_index == rank:
+                continue
+            factor = matrix[row_index][column]
+            if abs(factor) <= tolerance:
+                continue
+            matrix[row_index] = [
+                value - factor * pivot_value
+                for value, pivot_value in zip(matrix[row_index], matrix[rank])
+            ]
+        rank += 1
+        if rank == row_count:
+            break
+    return rank
+
+
+def _build_identifiability_evidence(
+    *, schema: Mapping[str, Any], training: list[Mapping[str, Any]]
+) -> tuple[dict[str, Any], list[ActionableIssue]]:
+    parameter_names = sorted(schema)
+    distinct_by_parameter = {
+        name: sorted({record["parameters"][name] for record in training})
+        for name in parameter_names
+    }
+    issues: list[ActionableIssue] = []
+    for parameter_name in parameter_names:
+        distinct = distinct_by_parameter[parameter_name]
+        if len(distinct) < 2:
+            issues.append(
+                ActionableIssue(
+                    code="DUT_PARAMETER_NOT_IDENTIFIABLE",
+                    category="coverage_or_identifiability",
+                    severity="blocker",
+                    stage="corpus_onboarding",
+                    message=(
+                        f"{parameter_name} does not vary in the training examples, so its "
+                        "geometry dependencies cannot be learned."
+                    ),
+                    field_path=f"/parameter_schema/{parameter_name}",
+                    received={"distinct_training_values": distinct},
+                    expected={
+                        "minimum_distinct_training_values": 2,
+                        "unit": schema[parameter_name]["unit"],
+                    },
+                    reason="A fixed training value is indistinguishable from drawing style or an unrelated constant.",
+                    fix="Add independently varied labeled DUT examples before compiling this parameter.",
+                )
+            )
+
+    normalized_rows: list[list[float]] = []
+    column_centers = {
+        name: sum(float(record["parameters"][name]) for record in training)
+        / len(training)
+        for name in parameter_names
+    }
+    for record in training:
+        row = []
+        for name in parameter_names:
+            values = distinct_by_parameter[name]
+            span = float(values[-1]) - float(values[0])
+            row.append(
+                0.0
+                if span == 0.0
+                else (float(record["parameters"][name]) - column_centers[name]) / span
+            )
+        normalized_rows.append(row)
+    design_rank = _matrix_rank(normalized_rows)
+    if (
+        all(len(distinct_by_parameter[name]) >= 2 for name in parameter_names)
+        and design_rank < len(parameter_names)
+    ):
+        issues.append(
+            ActionableIssue(
+                code="DUT_PARAMETER_EFFECTS_CONFOUNDED",
+                category="coverage_or_identifiability",
+                severity="blocker",
+                stage="corpus_onboarding",
+                message="The training DOE cannot separate every declared parameter effect.",
+                field_path="/dut_records",
+                received={
+                    "normalized_design_matrix_rank": design_rank,
+                    "parameter_count": len(parameter_names),
+                },
+                expected={"minimum_design_matrix_rank": len(parameter_names)},
+                reason="Parameters that move together can explain the same geometry change, so their dependencies are not identifiable.",
+                fix="Add training DUTs that vary the coupled parameters independently.",
+            )
+        )
+
+    conditional_variation: dict[str, dict[str, Any]] = {}
+    for parameter_name in parameter_names:
+        other_names = [name for name in parameter_names if name != parameter_name]
+        groups: dict[tuple[tuple[str, int | float], ...], list[Mapping[str, Any]]] = defaultdict(list)
+        for record in training:
+            key = tuple((name, record["parameters"][name]) for name in other_names)
+            groups[key].append(record)
+        witnesses = [
+            group
+            for group in groups.values()
+            if len({record["parameters"][parameter_name] for record in group}) >= 2
+        ]
+        satisfied = bool(witnesses)
+        witness_ids = (
+            sorted(record["dut_id"] for record in witnesses[0]) if witnesses else []
+        )
+        conditional_variation[parameter_name] = {
+            "satisfied": satisfied,
+            "witness_dut_ids": witness_ids,
+            "held_constant_parameters": other_names,
+        }
+        if len(distinct_by_parameter[parameter_name]) >= 2 and not satisfied:
+            issues.append(
+                ActionableIssue(
+                    code="DUT_PARAMETER_CONDITIONAL_VARIATION_MISSING",
+                    category="coverage_or_identifiability",
+                    severity="blocker",
+                    stage="corpus_onboarding",
+                    message=(
+                        f"{parameter_name} never changes while the other declared parameters stay fixed."
+                    ),
+                    field_path=f"/parameter_schema/{parameter_name}",
+                    received={"held_constant_witness_dut_ids": []},
+                    expected={"minimum_conditional_variation_witnesses": 1},
+                    reason="A parameter effect cannot be separated safely without a same-context comparison.",
+                    fix=f"Add at least two DUTs where only {parameter_name} changes.",
+                )
+            )
+
+    issues = sorted(issues, key=ActionableIssue.sort_key)
+    evidence = {
+        "schema_version": 1,
+        "status": "blocked" if issues else "sufficient",
+        "blocker_count": len(issues),
+        "issues": [issue.to_dict() for issue in issues],
+        "training_dut_ids": sorted(record["dut_id"] for record in training),
+        "parameter_names": parameter_names,
+        "parameter_count": len(parameter_names),
+        "normalized_design_matrix_rank": design_rank,
+        "minimum_required_rank": len(parameter_names),
+        "conditional_variation": conditional_variation,
+    }
+    return evidence, issues
+
+
+def _require_identifiability_ready(corpus: Mapping[str, Any]) -> None:
+    evidence = corpus.get("identifiability_evidence")
+    if not isinstance(evidence, Mapping):
+        _fail(
+            "DUT_CORPUS_IDENTIFIABILITY_EVIDENCE_MISSING",
+            "The corpus has no persisted parameter-identifiability evidence.",
+            details={"field": "identifiability_evidence"},
+            next_action="Re-onboard the labeled DUT corpus with the current identifiability analysis.",
+        )
+    conditional = evidence.get("conditional_variation")
+    conditional_failures = (
+        sorted(
+            name
+            for name, result in conditional.items()
+            if not isinstance(result, Mapping) or result.get("satisfied") is not True
+        )
+        if isinstance(conditional, Mapping)
+        else ["<invalid-evidence>"]
+    )
+    blocker_count = evidence.get("blocker_count")
+    rank = evidence.get("normalized_design_matrix_rank")
+    required_rank = evidence.get("minimum_required_rank")
+    if (
+        evidence.get("status") != "sufficient"
+        or blocker_count != 0
+        or isinstance(rank, bool)
+        or not isinstance(rank, int)
+        or isinstance(required_rank, bool)
+        or not isinstance(required_rank, int)
+        or rank < required_rank
+        or conditional_failures
+    ):
+        issues = evidence.get("issues")
+        _fail(
+            "DUT_CORPUS_IDENTIFIABILITY_BLOCKED",
+            "The corpus cannot advance because one or more parameter effects are not identifiable.",
+            details={
+                "field": "identifiability_evidence",
+                "blocker_count": blocker_count,
+                "issue_codes": [
+                    item.get("code")
+                    for item in issues
+                    if isinstance(item, Mapping)
+                ]
+                if isinstance(issues, list)
+                else [],
+                "normalized_design_matrix_rank": rank,
+                "minimum_required_rank": required_rank,
+                "conditional_variation_failures": conditional_failures,
+            },
+            next_action="Add independently and conditionally varied DUT examples, then onboard a new corpus version.",
+        )
+
+
 def onboard_dut_corpus(
     *,
     source_layout_path: str,
@@ -367,29 +581,9 @@ def onboard_dut_corpus(
                     )
                 )
         training = [record for record in enriched if record["dut_id"] not in set(validation_dut_ids)]
-        identifiability_issues = []
-        for parameter_name in sorted(schema):
-            distinct = sorted(
-                {record["parameters"][parameter_name] for record in training}
-            )
-            if len(distinct) < 2:
-                identifiability_issues.append(
-                    ActionableIssue(
-                        code="DUT_PARAMETER_NOT_IDENTIFIABLE",
-                        category="coverage_or_identifiability",
-                        severity="blocker",
-                        stage="corpus_onboarding",
-                        message=(
-                            f"{parameter_name} does not vary in the training examples, so its "
-                            "geometry dependencies cannot be learned."
-                        ),
-                        field_path=f"/parameter_schema/{parameter_name}",
-                        received={"distinct_training_values": distinct},
-                        expected={"minimum_distinct_training_values": 2, "unit": schema[parameter_name]["unit"]},
-                        reason="A fixed training value is indistinguishable from drawing style or an unrelated constant.",
-                        fix="Add independently varied labeled DUT examples before compiling this parameter.",
-                    )
-                )
+        identifiability_evidence, identifiability_issues = (
+            _build_identifiability_evidence(schema=schema, training=training)
+        )
         all_metric_names = sorted(set.intersection(*(set(record["flat_metrics"]) for record in training)))
         invariants = []
         for metric in all_metric_names:
@@ -407,7 +601,7 @@ def onboard_dut_corpus(
             "generalization_claim_allowed": False,
         }
         corpus = {
-            "schema_version": 1,
+            "schema_version": 2,
             "artifact_type": "DutCorpusArtifact",
             "technology_identity": immutable_json_copy(technology_identity),
             "device_family": device_family,
@@ -419,6 +613,7 @@ def onboard_dut_corpus(
             "layer_roles": roles,
             "dut_records": enriched,
             "coverage_matrix": _coverage(schema, enriched),
+            "identifiability_evidence": identifiability_evidence,
             "partition": partition,
             "drawing_style_profile": {
                 "invariant_metrics": invariants,
@@ -495,12 +690,12 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             details={"field": "package_path", "error_type": type(exc).__name__},
             next_action="Restore the exact content-addressed corpus package.",
         )
-    if not isinstance(corpus, dict) or corpus.get("schema_version") != 1 or corpus.get("artifact_type") != "DutCorpusArtifact":
+    if not isinstance(corpus, dict) or corpus.get("schema_version") not in {1, 2} or corpus.get("artifact_type") != "DutCorpusArtifact":
         _fail(
             "DUT_CORPUS_PACKAGE_SCHEMA_INVALID",
             "Corpus metadata does not match the supported DutCorpusArtifact schema.",
             details={"field": "corpus.json", "schema_version": corpus.get("schema_version") if isinstance(corpus, dict) else None, "artifact_type": corpus.get("artifact_type") if isinstance(corpus, dict) else None},
-            next_action="Restore a schema_version 1 DutCorpusArtifact package.",
+            next_action="Restore a supported schema_version 1 or 2 DutCorpusArtifact package.",
         )
     required_mappings = (
         "technology_identity",
@@ -542,6 +737,47 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             details={"field": "technology_identity", "invalid_fields": invalid_technology_fields},
             next_action="Restore exact technology and PDK revision identity.",
         )
+    if corpus.get("schema_version") == 2:
+        evidence = corpus.get("identifiability_evidence")
+        issues = evidence.get("issues") if isinstance(evidence, Mapping) else None
+        conditional = (
+            evidence.get("conditional_variation")
+            if isinstance(evidence, Mapping)
+            else None
+        )
+        blocker_count = (
+            evidence.get("blocker_count") if isinstance(evidence, Mapping) else None
+        )
+        if (
+            not isinstance(evidence, Mapping)
+            or evidence.get("schema_version") != 1
+            or evidence.get("status") not in {"sufficient", "blocked"}
+            or isinstance(blocker_count, bool)
+            or not isinstance(blocker_count, int)
+            or blocker_count < 0
+            or not isinstance(issues, list)
+            or blocker_count != len(issues)
+            or any(
+                not isinstance(issue, Mapping)
+                or issue.get("severity") != "blocker"
+                or not isinstance(issue.get("code"), str)
+                for issue in issues
+            )
+            or not isinstance(conditional, Mapping)
+            or not isinstance(evidence.get("training_dut_ids"), list)
+            or not isinstance(evidence.get("parameter_names"), list)
+            or isinstance(evidence.get("normalized_design_matrix_rank"), bool)
+            or not isinstance(evidence.get("normalized_design_matrix_rank"), int)
+            or isinstance(evidence.get("minimum_required_rank"), bool)
+            or not isinstance(evidence.get("minimum_required_rank"), int)
+            or (evidence.get("status") == "sufficient") != (blocker_count == 0)
+        ):
+            _fail(
+                "DUT_CORPUS_IDENTIFIABILITY_EVIDENCE_INVALID",
+                "Persisted identifiability evidence is incomplete or internally inconsistent.",
+                details={"field": "identifiability_evidence"},
+                next_action="Restore or re-onboard the exact labeled DUT corpus.",
+            )
     dut_ids: list[str] = []
     for index, record in enumerate(corpus["dut_records"]):
         if (
@@ -587,6 +823,20 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             "Corpus partition must cover every DUT exactly once.",
             details={"field": "partition", "dut_ids": sorted(dut_ids), "train_dut_ids": train_ids, "validation_dut_ids": validation_ids},
             next_action="Restore the exact corpus partition manifest.",
+        )
+    evidence = corpus.get("identifiability_evidence")
+    if corpus.get("schema_version") == 2 and (
+        evidence.get("training_dut_ids") != sorted(train_ids)
+        or evidence.get("parameter_names") != sorted(corpus["parameter_schema"])
+        or evidence.get("parameter_count") != len(corpus["parameter_schema"])
+        or set(evidence.get("conditional_variation", {}))
+        != set(corpus["parameter_schema"])
+    ):
+        _fail(
+            "DUT_CORPUS_IDENTIFIABILITY_EVIDENCE_INVALID",
+            "Identifiability evidence is not bound to this corpus partition and parameter schema.",
+            details={"field": "identifiability_evidence"},
+            next_action="Restore or re-onboard the exact labeled DUT corpus.",
         )
     source_sha256 = hashlib.sha256(sources[0].read_bytes()).hexdigest()
     if source_sha256 != corpus.get("source_layout_sha256"):
@@ -719,6 +969,9 @@ def _validate_scorecard_evidence(
         or not isinstance(compiler_identity, Mapping)
         or scorecard.get("compiler_identity_sha256") != canonical_sha256(compiler_identity)
         or compiler_identity.get("compiler_code_sha256") != compiler_code_sha256
+        or scorecard.get("reference_dbu_um") != corpus.get("dbu_um")
+        or scorecard.get("candidate_dbu_um") != corpus.get("dbu_um")
+        or scorecard.get("dbu_exact_match") is not True
     ):
         _fail(
             "ADAPTER_CANDIDATE_SCORECARD_BINDING_INVALID",
@@ -749,6 +1002,7 @@ def _validate_scorecard_evidence(
             next_action="Regenerate the scorecard from the exact corpus.",
         )
     seen: set[str] = set()
+    exact_required = policy.get("exact_fingerprint_required") is True
     for item in per_dut:
         dut_id = item.get("dut_id") if isinstance(item, Mapping) else None
         expected_cohort = "logical_validation" if dut_id in expected_validation else "train_reference"
@@ -757,6 +1011,10 @@ def _validate_scorecard_evidence(
             or dut_id in seen
             or item.get("cohort") != expected_cohort
             or item.get("passed") is not True
+            or not isinstance(item.get("hard_fail_reasons"), list)
+            or item.get("hard_fail_reasons")
+            or item.get("exact_fingerprint_required") is not exact_required
+            or (exact_required and item.get("exact_geometry_match") is not True)
             or not SHA256_PATTERN.fullmatch(str(item.get("reference_geometry_fingerprint_sha256", "")))
             or not SHA256_PATTERN.fullmatch(str(item.get("candidate_geometry_fingerprint_sha256", "")))
         ):
@@ -884,6 +1142,7 @@ def score_reproduced_corpus(
     """Score a reproduced layout against training and logical-validation DUTs."""
 
     _, corpus, corpus_sha256 = _load_corpus_package(corpus_package_path)
+    _require_identifiability_ready(corpus)
     if (
         not isinstance(compiler_identity, Mapping)
         or not isinstance(compiler_identity.get("compiler_id"), str)
@@ -907,6 +1166,16 @@ def score_reproduced_corpus(
             "Conformance scoring policy is incomplete.",
             details={"field": "scoring_policy", "missing": missing_policy},
             next_action="Set explicit tolerances, aggregate threshold, and fingerprint policy before scoring.",
+        )
+    if not isinstance(scoring_policy["exact_fingerprint_required"], bool):
+        _fail(
+            "CORPUS_SCORING_POLICY_INVALID",
+            "exact_fingerprint_required must be an explicit boolean.",
+            details={
+                "field": "scoring_policy.exact_fingerprint_required",
+                "received": scoring_policy["exact_fingerprint_required"],
+            },
+            next_action="Set exact_fingerprint_required to true or false explicitly.",
         )
     absolute_tolerance = float(scoring_policy["absolute_tolerance"])
     relative_tolerance = float(scoring_policy["relative_tolerance"])
@@ -947,6 +1216,27 @@ def score_reproduced_corpus(
         )
         if not analysis.get("ok"):
             return analysis
+        candidate_dbu_um = analysis.get("dbu_um")
+        reference_dbu_um = corpus.get("dbu_um")
+        if (
+            isinstance(candidate_dbu_um, bool)
+            or not isinstance(candidate_dbu_um, (int, float))
+            or not math.isfinite(float(candidate_dbu_um))
+            or isinstance(reference_dbu_um, bool)
+            or not isinstance(reference_dbu_um, (int, float))
+            or not math.isfinite(float(reference_dbu_um))
+            or float(candidate_dbu_um) != float(reference_dbu_um)
+        ):
+            _fail(
+                "REPRODUCED_CORPUS_DBU_MISMATCH",
+                "Reproduced layout DBU must exactly match the corpus DBU before geometry scoring.",
+                details={
+                    "field": "dbu_um",
+                    "expected": reference_dbu_um,
+                    "received": candidate_dbu_um,
+                },
+                next_action="Regenerate the reproduced layout using the exact corpus technology DBU.",
+            )
         candidate_by_id = {item["dut_id"]: item for item in analysis["observations"]}
         holdout = set(
             corpus["partition"].get(
@@ -985,15 +1275,22 @@ def score_reproduced_corpus(
             metric_score = sum(item["score"] for item in metrics) / len(metrics) if metrics else 0.0
             exact_required = bool(scoring_policy["exact_fingerprint_required"])
             dut_score = metric_score if not exact_required or fingerprint_match else 0.0
+            hard_fail_reasons = []
+            if exact_required and not fingerprint_match:
+                hard_fail_reasons.append("EXACT_GEOMETRY_FINGERPRINT_MISMATCH")
+            if any(item["hard_fail"] for item in metrics):
+                hard_fail_reasons.append("REQUIRED_GEOMETRY_METRIC_MISSING")
             per_dut.append({
                 "dut_id": dut_id,
                 "cohort": "logical_validation" if dut_id in holdout else "train_reference",
                 "reference_geometry_fingerprint_sha256": reference["geometry_fingerprint_sha256"],
                 "candidate_geometry_fingerprint_sha256": candidate["geometry_fingerprint_sha256"],
                 "exact_geometry_match": fingerprint_match,
+                "exact_fingerprint_required": exact_required,
                 "metrics": metrics,
                 "aggregate_score": dut_score,
-                "passed": dut_score >= threshold and not any(item["hard_fail"] for item in metrics),
+                "hard_fail_reasons": hard_fail_reasons,
+                "passed": dut_score >= threshold and not hard_fail_reasons,
             })
     cohorts = {}
     for cohort in ("train_reference", "logical_validation"):
@@ -1013,6 +1310,9 @@ def score_reproduced_corpus(
         "scoring_policy_sha256": canonical_sha256(scoring_policy),
         "compiler_identity": immutable_json_copy(compiler_identity),
         "compiler_identity_sha256": canonical_sha256(compiler_identity),
+        "reference_dbu_um": corpus["dbu_um"],
+        "candidate_dbu_um": candidate_dbu_um,
+        "dbu_exact_match": True,
         "reproduced_layout_sha256": snapshot.sha256,
         "reference_source_replayed": reference_source_replayed,
         "evidence_class": (
@@ -1056,6 +1356,7 @@ def build_technology_adapter_candidate(
     """Package a scored candidate without claiming foundry qualification."""
 
     _, corpus, corpus_sha256 = _load_corpus_package(corpus_package_path)
+    _require_identifiability_ready(corpus)
     _, resolution, _ = _load_json_package(
         resolution_package_path,
         document_name="resolution.json",

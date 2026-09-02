@@ -160,6 +160,58 @@ def test_revocation_order_survives_restart_when_timestamps_go_backward(
         assert caught.value.code == "TECH_ADAPTER_REVOKED"
 
 
+def test_registry_restart_rejects_deleted_final_revocation_record(
+    tmp_path: Path,
+) -> None:
+    registry = TechnologyAdapterRegistry(tmp_path)
+    registered = registry.register_package(_package())
+    registry.append_lifecycle_record(
+        package_sha256=registered["package_sha256"],
+        action="qualified",
+        reason="qualification completed",
+        recorded_at="2026-09-02T10:00:00Z",
+        signer_reference="host-trust://review-board",
+        signature_sha256="e" * 64,
+    )
+    revoked = registry.append_lifecycle_record(
+        package_sha256=registered["package_sha256"],
+        action="revoked",
+        reason="evidence invalidated",
+        recorded_at="2026-09-02T11:00:00Z",
+        signer_reference="host-trust://review-board",
+        signature_sha256="f" * 64,
+    )
+    (tmp_path / "lifecycle" / f"{revoked['record_sha256']}.json").unlink()
+
+    with pytest.raises(AnalysisError) as caught:
+        TechnologyAdapterRegistry(tmp_path)
+
+    assert caught.value.code == "TECH_ADAPTER_LIFECYCLE_HEAD_MISMATCH"
+    assert caught.value.details["expected_sequence"] == 2
+    assert caught.value.details["received_sequence"] == 1
+
+
+def test_registry_restart_rejects_lifecycle_without_trusted_head(
+    tmp_path: Path,
+) -> None:
+    registry = TechnologyAdapterRegistry(tmp_path)
+    registered = registry.register_package(_package())
+    registry.append_lifecycle_record(
+        package_sha256=registered["package_sha256"],
+        action="qualified",
+        reason="qualification completed",
+        recorded_at="2026-09-02T10:00:00Z",
+        signer_reference="host-trust://review-board",
+        signature_sha256="e" * 64,
+    )
+    (tmp_path / "lifecycle_heads" / f"{registered['package_sha256']}.json").unlink()
+
+    with pytest.raises(AnalysisError) as caught:
+        TechnologyAdapterRegistry(tmp_path)
+
+    assert caught.value.code == "TECH_ADAPTER_LIFECYCLE_HEAD_MISSING"
+
+
 def test_revocation_is_terminal_for_exact_package(tmp_path: Path) -> None:
     registry = TechnologyAdapterRegistry(tmp_path)
     registered = registry.register_package(_package())

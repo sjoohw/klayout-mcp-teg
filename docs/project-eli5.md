@@ -133,6 +133,11 @@ PCellizer는 기존 GDS에서 바꿀 direct box를 고른다. 사용자는 ruler
 따라서 실제 transistor adapter는 이 PCellizer를 확장하는 방식으로 만들지 않는다. 위의 여러 DUT
 corpus를 바탕으로 별도의 공정별 compiler를 만들고 검증하는 방향을 사용한다.
 
+예시 DUT에서 Lg와 CPP가 항상 같이 변하면 어느 값이 도형을 바꾼 원인인지 알 수 없다. 이제 이런
+묶인 실험은 “자료 부족”으로 저장하고 다음 단계로 넘기지 않는다. 각 값을 따로 바꾼 비교 DUT가
+필요하다. 또한 “모양이 정확히 같아야 함”을 선택했다면 합격 점수를 0으로 잡아도 다른 모양은
+통과하지 못한다.
+
 ## Reference Library
 
 Reference Library는 공정별 견본 창고다.

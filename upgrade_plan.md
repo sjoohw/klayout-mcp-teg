@@ -547,6 +547,9 @@ Upgrade checkpoint 진행:
 - [x] 여러 labeled DUT cell과 parameter row, semantic layer/terminal mapping, logical validation partition을
   받는 corpus artifact와 coverage/identifiability gate를 구현했다. 같은 source에 geometry가 보이므로
   sealed holdout이라고 주장하지 않는다.
+- [x] Identifiability blocker를 corpus schema v2에 영구 결속하고, normalized design-matrix rank와
+  parameter별 conditional-variation witness를 검사한다. Blocker가 하나라도 있거나 구 schema에 해당
+  evidence가 없으면 score/candidate 단계가 fail-closed한다.
 - [x] Observed invariant style metric과 same-parameter/different-geometry ambiguity를 검출하고, 사용자가
   따를 DUT/policy를 immutable resolution manifest로 선택하도록 했다.
 - [x] Reproduced GDS를 실제로 다시 읽어 train/validation을 분리 scoring한다. 원본 stream replay는
@@ -558,6 +561,8 @@ Upgrade checkpoint 진행:
 - [x] 다른 file SHA는 independent reproduction이 아닌
   `distinct_stream_logical_validation_no_execution_receipt`로 표시한다. Integer parameter, terminal
   layer role과 per-DUT topology를 선언 schema에 맞게 fail-closed 검증한다.
+- [x] `exact_fingerprint_required`는 aggregate threshold와 무관한 per-DUT hard gate이며, reproduced
+  stream과 corpus의 DBU exact equality를 scoring 전 hard gate로 검사한다.
 - [ ] Corpus로부터 CPP 연계 Poly/Active/contact/implant/terminal dependency recipe를 자동 합성하는
   process-specific compiler는 만들지 않았다. 실제 labeled corpus, topology 규칙과 foundry 검증 없이는
   한 GDS에서 이를 추론하지 않으며 candidate score를 PCell/electrical/foundry 동등성으로 승격하지 않는다.
