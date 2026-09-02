@@ -15,7 +15,13 @@ src/klayout_mcp/
 ├─ layout_service.py         inspect/compare
 ├─ mesh_routing.py           generic staged mesh/contact compiler
 ├─ kelvin_*.py               SLN001 Kelvin profile
-├─ phase1_*.py               R/MOM scaffold와 transistor-adapter blocker; synthetic Pad/route composition
+├─ phase1_*.py               R/MOM scaffold와 transistor-adapter blocker; synthetic Pad/mesh-route composition
+├─ pad_macro.py              immutable Pad macro artifact와 overlay composition
+├─ dut_corpus.py             labeled DUT coverage/variation/holdout scoring
+├─ technology_registry.py    exact candidate package registry
+├─ file_publication.py       local create-only file/directory publication
+├─ host_factory.py           host component 조립과 preflight
+├─ verification_runner.py    host-only external runner 계약
 ├─ pcellizer_*.py            non-array direct-box 1-parameter static-GDS authoring
 ├─ reference_*.py            content-addressed reference library
 └─ examples/profiles/        isolated nonproduction process adapters
@@ -40,7 +46,7 @@ uv run --frozen --extra dev pytest -q
 uv run --frozen --extra dev python -m compileall -q src tests examples
 ```
 
-Reviewed baseline, not release evidence:
+Historical baseline, not release evidence:
 
 | 항목 | 관측값 |
 |---|---|
@@ -50,8 +56,10 @@ Reviewed baseline, not release evidence:
 | same-SHA remote CI | [Actions run 33589034379](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33589034379): pytest 5 jobs failed, csh smoke only passed |
 | release verdict | red; local pass count를 current-main 또는 cross-platform 검증으로 사용하지 않음 |
 
-현재 upgrade working tree의 같은 로컬 환경 진단은 `702 passed, 1 warning`이다. Commit과 동일 SHA의
-remote CI가 아니므로 release evidence나 cross-platform qualification으로 사용하지 않는다.
+Upgrade commit `7a7348268c8af2593e59d2a1c6d434b32c0fb087`의 같은 로컬 환경 진단은
+`702 passed, 1 warning`이다. 같은 SHA의 [Actions run 33617837011](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33617837011)은
+Windows 3.11/3.13, wheel smoke와 csh launcher가 통과했지만 Ubuntu 3.11/3.13과 KLayout integration이
+OS별 안내문 테스트 한 건으로 실패했다. 따라서 현재 release verdict도 red다.
 
 Pass count를 README와 여러 문서에 복사하지 않는다. Release evidence는 exact SHA, clean/dirty state,
 lock provenance, OS/Python/KLayout, pass/skip/warning과 Actions URL을 가진 generated artifact로만
@@ -63,8 +71,12 @@ lock provenance, OS/Python/KLayout, pass/skip/warning과 Actions URL을 가진 g
 - KLayout hierarchical GDS/OAS read, fresh reload, layer Region XOR.
 - Live/generated PCell과 hierarchy variant reuse.
 - Kelvin six-split regeneration과 project regression reference recursive XOR 0.
-- 분리된 Phase 1 R/MOM primitive, conceptual transistor fixture, context, standalone mesh/contact unit
-  contracts. 실제 transistor adapter, pad-preserving composition 또는 Phase 1 mesh E2E 검증은 아님.
+- 분리된 Phase 1 R/MOM primitive, conceptual transistor fixture와 context contract.
+- Phase 1 polyline→multi-rail mesh integration, bend/terminal tie와 bounded-search stress. 실제
+  Pad/DUT landing을 사용한 84-connection acceptance는 아님.
+- Immutable Pad macro 등록/overlay와 recursive source-cell preservation. Legacy Phase 1 handoff는 아님.
+- Labeled DUT corpus coverage, invariant style, variation resolution, train/holdout score와 candidate
+  registry. Parameter dependency compiler나 actual transistor materialization 검증은 아님.
 - PCellizer occurrence/array inventory와 transform/snapshot determinism, non-array direct-box static-GDS
   batch. Reusable PCell이나 array-member/composite authoring 검증은 아님.
 - Reference library selection/precedent contract.
@@ -95,15 +107,18 @@ Ubuntu KLayout integration은 공식 package/checksum과 offscreen Qt를 사용�
 5. Mode별 `server_status` capability/recommendation filtering.
 6. Host-only trusted signoff policy가 선택한 current-layout evidence subset과 receipt binding.
 7. `workflow://` document status rehash, Windows-safe job id와 per-job append serialization.
+8. 공개 file/content-addressed directory writer의 local create-only publication과 same-target winner 보존.
+9. Phase 1 polyline의 multi-rail mesh composition과 router node/wall-time budget.
+10. Immutable Pad macro overlay, labeled DUT corpus/holdout score와 exact candidate registry.
 
 남은 우선순위:
 
-1. 현재 CI 실패와 남은 style/overlay/content-store/persistent same-target race 복구. Generic Manhattan drawing은 create-only publish 적용 완료.
-2. Actual transistor primitive adapter와 production registry 격리.
-3. 실제 pad macro hierarchy/stack 보존형 composition.
-4. Bounded global routing과 Phase 1 mesh compiler 통합.
-5. Host-injected component를 포함한 real stdio persistent restart E2E.
-6. Profile별 sweep/topology/de-embedding schema 구체화.
+1. Linux에서 실패하는 OS별 안내문 테스트를 수정하고 동일 SHA CI를 green으로 만든다.
+2. Corpus에서 CPP 연계 dependent geometry를 만드는 actual transistor compiler를 구현한다.
+3. Immutable Pad macro, corpus-derived DUT와 mesh route를 persistent target-process engine에 연결한다.
+4. Supplied Pad edge/DUT port를 쓰는 실제 21-DUT, 84-connection routing acceptance를 수행한다.
+5. Host-injected component를 포함한 real stdio persistent restart E2E와 foundry pilot을 수행한다.
+6. ext4/XFS, unsupported NFS/SMB와 폐쇄망 RHEL deployment를 qualification한다.
 
 각 항목은 drawing 자체를 막는 임의 gatekeeper가 아니라, 해당 evidence/readiness claim을
 정확히 제한하는 방식으로 구현한다.

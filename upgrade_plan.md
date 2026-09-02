@@ -65,11 +65,12 @@ model, runtime, measurement qualification은 서로 다른 시점에 true일 수
 silicon correlation 및 PCM release는 후속 gate이며, 준비되지 않은 dimension은 계속 false 또는
 unavailable로 남긴다.
 
-## 2. 검토로 확인된 현재 기준선
+## 2. Review 기준선과 upgrade checkpoint
 
-기준은 `main` commit `1df82b5043a41cf1485bdc7e1bf43c9a2930d1cf`, 2026-09-02 KST다.
+Review 기준선은 `1df82b5043a41cf1485bdc7e1bf43c9a2930d1cf`다. 구현 상태 checkpoint는
+`main` commit `7a7348268c8af2593e59d2a1c6d434b32c0fb087`, 2026-09-02 KST다.
 
-| 항목 | 확인 결과 | 계획에 반영할 보정 |
+| 항목 | Review 기준선의 확인 결과 | 계획에 반영한 보정 |
 |---|---|---|
 | Transistor primitive | `phase1_workflow.py`는 transistor에서 항상 `PROCESS_PRIMITIVE_ADAPTER_NOT_IMPLEMENTED`를 반환한다. | 비슷한 polygon을 그리는 문제가 아니라 공정별 다중 parameter와 dependent geometry를 materialize하는 adapter가 없는 것이 blocker다. |
 | Conceptual transistor | `dut_geometry.py`는 0.22 µm contact 등 합성 치수를 쓰고 `conceptual_scaffold`를 반환한다. | Phase 1 handoff gate가 직접 주입은 막지만, 기본 expert surface에서 별도 E2E 대안처럼 보이는 오선택 위험이 있다. |
@@ -78,7 +79,7 @@ unavailable로 남긴다.
 | Router | connection당 후보는 96개로 제한되지만 DFS에는 node/deadline/cancellation 제한이 없다. | 탐색은 이론상 유한하나 운영 시간은 bounded가 아니다. 1-DUT/4-terminal 테스트만으로 21-site를 증명하지 못한다. |
 | PCellizer | Authoring-supported non-array occurrence의 direct box 하나에서 한 축을 parameter key 하나로 resize한다. | 이름과 달리 multi-parameter PCell generator가 아니다. `single-box variant generator`로 취급하고 실제 transistor adapter의 backend로 직접 승격하지 않는다. |
 | Persistent facade | stock server는 `approval_verifier=None`이며 production transistor engine과 foundry 실행 adapter가 없다. | `teg_plan` 진입 시 planning 전에 fail-closed하는 보안 동작은 유지하되, 설치·설정 가능한 host 조립 경로가 필요하다. |
-| 제한 모델 (working tree) | Generic drawing no-clobber schema를 반영한 재계측에서 serialized `tools/list` 전체 record는 expert 56/111,073자, facade 6/26,718자, drawing 7/13,176자다. 이 중 `inputSchema`만은 각각 72,407/22,827/8,050자이고 공통 instruction은 8,248자다. | drawing에는 Phase 1이 없고 stock facade는 intake/status만 가능하며 verifier 부재로 planning 전에 중단된다. Mode instruction도 아직 공통이고 현재 harness는 Gemma4가 아닌 proxy다. |
+| 제한 모델 (upgrade checkpoint) | Serialized `tools/list` 전체 record는 expert 64/122,686자, facade 7/21,919자, drawing 7/13,136자, onboarding 9/10,687자다. | drawing에는 Phase 1이 없고 stock facade는 verifier 부재로 planning 전에 중단된다. Mode instruction도 아직 공통이고 현재 harness는 Gemma4가 아닌 proxy다. |
 | Baseline remote CI | Baseline SHA의 [Actions run 33589034379](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33589034379)는 pytest 5개 job이 모두 실패했고 csh smoke만 성공했다. | Linux의 OS 고정 assertion, agy 부재 시 schema key 누락 외에 Windows content-store race도 있다. |
 | Baseline 로컬 회귀 | Windows/Python 3.13.5/KLayout 0.30.10에서 `646 passed, 1 warning`이었다. | baseline의 ambient OS/agy와 concurrency timing이 결함을 가리고, KLayout 유무는 skip 수를 바꾼다. README의 `644 passed`를 현재 증거로 쓰지 않는다. |
 | Output race | `worker_drawing.py`는 최초 exists check 뒤 `os.replace()`하며, 실패 cleanup에서 final path까지 지운다. | 후발 writer의 overwrite 및 선행 결과 삭제가 모두 가능하다. |
@@ -86,16 +87,18 @@ unavailable로 남긴다.
 
 ### 이 명확화 작업에서 선반영한 항목
 
-위 표는 검토 대상 commit의 기준선이다. 현재 working tree에는 production 기능으로 오인하기 쉬운
-표현을 먼저 고쳤다. Canonical capability 문서와 `server_status`/tool description은 stock 구현과 목표
+위 표의 결함 설명은 검토 대상 commit에서 시작했다. Upgrade checkpoint에는 production 기능으로
+오인하기 쉬운 표현을 고쳤다. Canonical capability 문서와 `server_status`/tool description은 stock 구현과 목표
 계약을 분리하고, model harness는 proxy trace smoke임을 report schema에 명시한다. csh launcher는
 `KLAYOUT_MCP_PYTHON` → checkout `.venv/bin/python` → `python3` 순으로 interpreter를 선택하고
 Python/dependency preflight를 수행한다. CI의 csh job도 uv venv 경로를 사용한다.
 
-이 조치는 폐쇄망 RHEL qualification이나 production E2E를 완성한 것이 아니다. 이 working tree의
-검증 결과는 Windows/Python 3.13.5/KLayout 0.30.10에서 `702 passed, 1 warning`이며, 동일 SHA의
-remote CI가 아니므로 release evidence로 사용하지 않는다. Pad/corpus/mesh/onboarding infrastructure는
-아래와 같이 구현됐고, 실제 process-specific generator와 foundry pilot은 외부 입력이 필요하다.
+이 조치는 폐쇄망 RHEL qualification이나 production E2E를 완성한 것이 아니다. Upgrade checkpoint의
+로컬 검증 결과는 Windows/Python 3.13.5/KLayout 0.30.10에서 `702 passed, 1 warning`이다. 같은 SHA의
+[Actions run 33617837011](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33617837011)은 Windows,
+wheel과 csh job이 통과했지만 Ubuntu와 KLayout integration이 OS 안내문 test 1건으로 실패했다.
+Pad/corpus/mesh/onboarding infrastructure는 아래와 같이 구현됐고, 실제 process-specific generator와
+foundry pilot은 외부 입력이 필요하다.
 
 ## 3. 목표 구조
 
@@ -199,7 +202,7 @@ artifact hash가 process capability 및 workflow manifest에 포함되어야 한
 8. 일반 회귀는 `uv sync --frozen --extra dev`와 `uv run --frozen`으로 실행하고, unit/KLayout integration marker를 분리한다. 별도 wheel-install smoke로 실제 package 배포도 검증해 ambient system package에 성공 여부가 좌우되지 않게 한다.
 9. output-root doctor가 exclusive create, no-clobber promotion과 durability capability를 검사한다. 정상 오류/경쟁 loser의 owned temp는 즉시 제거하고, process kill로 남은 owner-tagged temp는 startup scavenger가 TTL 이후 회수한다.
 
-현재 working-tree 진행:
+Upgrade checkpoint 진행:
 
 - [x] 공용 `publish_new_file()`의 same-directory fsync + atomic create-only hard-link commit을 구현했다.
 - [x] Generic Manhattan drawing을 helper로 이전하고 final-path cleanup을 제거했다.
@@ -265,7 +268,7 @@ artifact hash가 process capability 및 workflow manifest에 포함되어야 한
     revalidate → 같은 stage에서 resume`를 지원한다. Public boundary는 알려진 domain error를 공통 report로
     변환하고 예상하지 못한 fault만 raw traceback 없이 `INTERNAL_ERROR`+incident ID로 반환한다.
 
-현재 working-tree 진행:
+Upgrade checkpoint 진행:
 
 - [x] `HostComponents`, allowlisted stable component ID 기반 TOML loader와 profile×stage `host_doctor`를 구현했다.
 - [x] Exact-key immutable `TechnologyAdapterRegistry`, content-addressed package/snapshot과 append-only
@@ -332,7 +335,7 @@ Phase 1의 `frame_width/pad_count` 기반 Pad 재합성을 제거한다. Pilot�
    issue는 `/pad_macro/...` field path, Pad ID, source artifact hash, received/expected DBU·layer·edge와
    수정 가능한 manifest 예시 또는 source owner에게 확인할 질문을 포함한다.
 
-현재 working-tree 진행:
+Upgrade checkpoint 진행:
 
 - [x] Source stream/cell/hash, 40×40 bbox, common DBU, access layer/edge와 explicit Pad transform을
   content-addressed `PadMacroArtifact`로 등록한다.
@@ -537,7 +540,7 @@ example layout + DUT parameter manifest
    생성 결과를 fresh reload해 같은 scoring policy의 required dimensions와 terminal/connectivity를 다시
    검사한다.
 
-현재 working-tree 진행:
+Upgrade checkpoint 진행:
 
 - [x] 여러 labeled DUT cell과 parameter row, semantic layer/terminal mapping, sealed holdout을 받는 corpus
   artifact와 coverage/identifiability gate를 구현했다.
@@ -663,7 +666,7 @@ corpus가 현재 solver의 scope로 해결되지 않을 때만 후속 조건부 
 주요 파일: `routing_feasibility.py`, `phase1_routing.py`, `mesh_routing.py`,
 `phase1_layout.py`, `phase1_service.py`, `design_contract.py`와 21-site corpus.
 
-현재 working-tree 진행:
+Upgrade checkpoint 진행:
 
 - [x] Phase 1 polyline을 segment별 최소 2-rail mesh로 compile하고 bend/terminal tie, final overlap과
   mesh evidence를 composer/fresh-reload 결과에 연결했다. 장거리 single-rail fallback은 없다.
@@ -698,7 +701,7 @@ M2, M3, M4b를 M1의 host engine 뒤에서 하나의 job으로 연결한다.
    threshold, 관련 report/diff handle, retry 가능 여부를 공통 `ValidationReport`로 반환한다. Proprietary
    deck 원문이나 raw stack trace는 노출하지 않는다.
 
-현재 working-tree 진행과 외부 차단점:
+Upgrade checkpoint 진행과 외부 차단점:
 
 - [x] Persistent manifest/evidence normalization/signoff-policy 결속과 host-only external runner 실행 계약은
   구현됐다. 실행 report만으로 signoff나 `production_ready`가 되지 않는다.
@@ -734,7 +737,7 @@ M2, M3, M4b를 M1의 host engine 뒤에서 하나의 job으로 연결한다.
 6. 오류 UX rubric은 모델이 정확한 DUT/field/value/expected/reason을 짧게 설명하고, report에 있는 수정법이나
    필요한 질문만 제시하며, PDK 값을 발명하지 않고 같은 draft resume tool을 선택하는지 평가한다.
 
-현재 working-tree 진행:
+Upgrade checkpoint 진행:
 
 - [x] Stock 기본 mode를 `drawing`으로 바꾸고 `expert`는 opt-in으로 제한했다. `drawing` 7개,
   `facade` 7개, `onboarding` 9개 tool이며 compact sorted JSON 기준 각 task surface의
@@ -764,7 +767,7 @@ M2, M3, M4b를 M1의 host engine 뒤에서 하나의 job으로 연결한다.
 4. doctor는 선택 profile의 exact Python/KLayout allowlist, `mcp`/PyYAML/package version, executable/권한, output filesystem capability를 검사한다. Production profile만 adapter/deck/license/approval backend를 필수로 하고 일반 drawing smoke는 해당 누락을 readiness blocker로 보고하되 시작은 허용한다.
 5. 허용된 base image와 bundle을 staging한 뒤 network를 차단한다. 설치 전에 모든 RPM/wheel/payload hash와 signature를 검증하고, 이후 `--no-index` install, csh launch, MCP initialize/tools/list/status와 KLayout read/write smoke를 수행한다.
 
-현재 working-tree 진행:
+Upgrade checkpoint 진행:
 
 - [x] csh launcher는 explicit `KLAYOUT_MCP_PYTHON` → repository `.venv/bin/python` → system `python3`
   순서로만 선택하고, 선택 interpreter의 Python 3.11+/`mcp`/PyYAML/package import 실패를 stderr+nonzero로

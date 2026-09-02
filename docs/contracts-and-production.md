@@ -7,8 +7,8 @@
 ## 공통 안전 원칙
 
 - 원본 GDS/OAS와 reference는 변경하지 않는다.
-- Output은 새 경로를 사용한다. 단일 요청은 기존 target을 거부하지만 같은 경로의 동시 writer는
-  현재 지원하지 않으므로 호출자가 경로를 분리·직렬화한다.
+- Output은 새 경로를 사용한다. 기존 target은 거부한다. 지원 same-host local filesystem의 같은
+  경로에 여러 writer가 접근하면 create-only publish로 첫 결과를 보존하고 나머지는 거부한다.
 - DBU와 `(layer, datatype)`을 명시하고 display color로 layer를 추측하지 않는다.
 - User-facing 치수는 µm, exact geometry 계산은 integer DBU를 사용한다.
 - Routing은 horizontal/vertical Manhattan geometry만 허용한다.
@@ -60,10 +60,10 @@ obstacle/corridor, routing layer escalation과 output을 사용자에게 받는�
 
 ## Target routing acceptance contract
 
-이 절은 현재 Phase 1 구현 설명이 아니다. Stock Phase 1은 Pad를 재합성하고 DUT–Pad route를 고정 폭
-bounded polyline을 multi-rail mesh로 compile한다. 그러나 legacy Phase 1은 실제 Pad macro를 import하지
-않는다. Kelvin regression profile과
-standalone compiler가 아래 조건 일부를 각각 검증할 뿐, 통합 transistor E2E conformance는 없다.
+이 절은 전체 target-process E2E가 완료됐다는 뜻이 아니다. Stock Phase 1은 Pad를 재합성하고,
+DUT–Pad bounded polyline의 각 segment를 최소 2-rail cross-tied mesh로 compile한다. 그러나 legacy
+Phase 1은 실제 Pad macro를 import하지 않고 stock transistor adapter도 없다. Kelvin regression과
+Phase 1 mesh integration은 아래 조건 일부만 검증하며 통합 transistor E2E conformance는 없다.
 
 Direct measurement는 routing IR drop을 최소화하는 방향으로 다음 geometry를 사용한다.
 
@@ -220,9 +220,12 @@ Expected 업무 오류는 MCP `isError=true`, code/message/details/next_action�
 - Worker는 protocol stdin을 상속하지 않는다.
 - Persistent output은 host-controlled root 안의 basename만 허용한다. Generic drawing은 사용자가
   지정한 기존 parent directory를 사용할 수 있다.
-- Same-directory short `.tmp-UUID`와 replace는 한 writer의 partial target을 줄인다. 현재
-  generic/style/overlay와 content-document publish는 create-only/no-clobber concurrent commit이
-  아니므로 동일 target/job의 동시 호출을 지원하지 않는다.
+- 공개 file writer는 same-directory stage를 fsync한 뒤 create-only로 publish한다. Content-addressed
+  directory도 같은 digest는 idempotent success, 다른 content는 conflict로 끝난다.
+- 동일 job의 mutable manifest head는 OS lock과 expected-parent로 직렬화한다. 기존 final은 경쟁 loser나
+  handled failure가 삭제하지 않는다.
+- 이 보장은 same-host local NTFS/ext4/XFS 계약이다. NFS/SMB/multi-host writer는 mutation 전에
+  fail-closed한다. ext4/XFS와 unsupported mount의 실제 qualification은 별도로 남아 있다.
 - Final output은 fresh KLayout에서 다시 읽는다.
 - Restart 상태는 append-only manifest ancestry로 확인한다.
 

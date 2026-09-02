@@ -14,6 +14,9 @@
 | 명시적 직교 도형 생성 | `draw_manhattan_layout` | 지원 | 새 nonproduction GDS/OAS |
 | Kelvin reference 재현 | Kelvin 전용 plan/generate/compare | 지원 | 6-split nonproduction GDS |
 | Non-array occurrence의 direct box 한 축을 resize한 static split GDS 생성 | PCellizer workflow | 제한 지원 | one parameter, row별 standalone GDS; reusable PCell 아님 |
+| 실제 Pad macro 등록·보존 배치 | `register_pad_macro` → `compose_registered_pad_macro` | 지원 | Source Pad subtree를 수정하지 않는 overlay GDS |
+| Labeled transistor corpus 등록·검토 | `onboard_transistor_corpus` → `resolve_transistor_corpus` | 지원 | Coverage, invariant style, ambiguity와 human resolution artifact |
+| 재현 DUT score·candidate 저장 | `score_transistor_adapter` → build/register candidate | 제한 지원 | Train/holdout score와 exact registry entry; callable transistor compiler 아님 |
 | Node별 reference 관리 | Reference Library workflow | 지원 | immutable reference selection |
 | Persistent job | `teg_intake` | 제한 지원 | Stock은 bundled research-only Kelvin resistor profile/version만 지원 |
 | Persistent plan/generate/verify | 4-call facade | host 통합 필요 | resumable evidence chain |
@@ -122,9 +125,9 @@ tester program이나 sign-off를 의미하지 않는다. 예제 verifier는 prod
 timing/environment/safety와 exact multiplicity까지 승인 intent와 대조한다.
 
 Generation engine은 unique staging stream을 만들고 검증 결과와 hash를 `generation_staged`에 먼저
-저장한다. Final은 target directory의 sibling temp를 거쳐 replace된다. 이는 한 writer의 partial
-target을 줄이지만 create-only concurrent commit을 증명하지 않는다. 같은 job/output에 대한 여러
-agent/process 호출은 외부에서 직렬화해야 한다. Staging 직후,
+저장한다. Final은 target directory의 sibling stage에서 create-only로 publish된다. 같은 local
+job의 head append는 OS lock과 expected-parent로 직렬화되고, 같은 output 경쟁의 loser는 winner를
+변경하지 않는다. Staging 직후,
 final 기록 직후 또는 `drawing_complete` 이후 중단되면 동일 approval과 exact filename으로
 `teg_generate`를 재호출한다. 저장된 layout/result hash를 확인해 generation engine을 재실행하지
 않고 다음 stage를 append한다.
@@ -178,9 +181,53 @@ process capability
 ```
 
 장거리 single rail 금지와 explicit multi-metal escalation은 **목표 acceptance contract**다. 현재
-Phase 1 composer는 이 계약을 만족하는 mesh route를 생성하지 않는다. 여러 net의 mesh envelope를
-동시에 최적화하는 전역 router도 없다. 따라서 `generate_phase1_direct_teg` 결과를 실제
+Phase 1 composer는 각 bounded polyline segment를 최소 2-rail cross-tied mesh로 만들고 bend와
+terminal tie를 검사한다. 여러 net의 mesh envelope를 실제 21-DUT/Pad corpus에서 함께 검증한 전역
+router는 없다. 따라서 `generate_phase1_direct_teg` 결과를 실제
 transistor/pad-macro/mesh E2E로 설명하면 안 된다.
+
+## Immutable Pad macro onboarding
+
+Pad GDS/OAS는 내부 stack을 다시 그리지 않고 black-box macro로 등록한다.
+
+```text
+register_pad_macro
+→ source stream/top cell/DBU/access layer/instance transform 고정
+→ eligible edge landing 확인
+→ compose_registered_pad_macro
+→ source Pad subtree 불변과 fresh reload 확인
+```
+
+`compose_registered_pad_macro`는 새 top cell에 등록된 Pad instance와 별도 DUT/routing box를 넣는다.
+Pad cell 안의 metal, via와 passivation을 수정하거나 새 Pad geometry를 합성하지 않는다. 현재 이
+overlay composer는 legacy Phase 1의 synthetic Pad 경로와 분리돼 있다.
+
+## Labeled transistor corpus onboarding
+
+복잡한 transistor를 한 GDS에서 추측하지 않는다. 여러 DUT가 들어 있는 source layout과 DUT별
+parameter, terminal, topology와 semantic layer role을 함께 받는다.
+
+```text
+onboard_transistor_corpus
+→ coverage/invariant style/same-parameter variation 확인
+→ resolve_transistor_corpus
+→ 외부 process-specific compiler가 reproduced GDS 생성
+→ score_transistor_adapter
+→ build_transistor_adapter_candidate
+→ register_transistor_adapter_candidate
+```
+
+Parameter schema에는 Gate length, CPP, planar width, nFin과 cell height 같은 필요한 축을 모두 이름과
+단위로 등록할 수 있다. 각 DUT row는 schema의 모든 값을 가져야 한다. Holdout DUT는 fitting 전에
+분리한다.
+
+같은 parameter row인데 geometry가 다르면 `onboard_transistor_corpus`는 어느 reference DUT를 따를지
+묻는다. 사용자의 결정은 immutable resolution artifact에 기록된다. 관측된 invariant metric은
+drawing-style 후보이며 공정 규칙으로 승격되지 않는다.
+
+Score는 reproduced train/holdout cell을 실제로 다시 읽어 비교한다. 통과한 candidate도
+`candidate_scored_not_foundry_qualified` 상태다. 현재 corpus workflow는 CPP와 연계된 Gate/Active/
+Contact/implant/terminal dependency recipe를 자동 합성하거나 callable transistor PCell을 만들지 않는다.
 
 ## PCellizer
 
@@ -238,8 +285,8 @@ marker는 비차단 `REVIEW_NEEDED`로 남긴다. `REF_ACCEPTED`는 DRC-clean이
 Layer role은 supplied layermap에서만 붙이고 geometry나 display color로 추측하지 않는다. 관측된
 치수는 reference의 drawing 관행이지 design-rule minimum/maximum이 아니다. Net, terminal,
 electrical performance와 DRC waiver도 추론하지 않는다. JSON profile은 source GDS SHA-256과 profile
-SHA-256을 포함한다. 단일 호출은 기존 target을 거부하지만 same-target concurrent writer는 지원하지
-않으므로 서로 다른 output path를 사용하거나 외부에서 직렬화해야 한다.
+SHA-256을 포함한다. 기존 target은 보존한다. 지원 local filesystem의 same-target concurrent writer는
+create-only publish를 사용하며 loser가 winner를 덮어쓰거나 삭제하지 않는다.
 
 Portable example은
 `examples/style-profiles/sln001_kelvin_style.json`에 있고 source GDS와 layermap은 각각

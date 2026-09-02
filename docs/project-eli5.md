@@ -74,9 +74,11 @@ Mesh는 전류가 지나갈 길을 늘린다. 금속 배선의 전압 손실을 
 
 배선이 Pad나 DUT와 만나는 부분도 검사한다. 얇은 목, 어긋난 중심, 겹쳐서 넓어진 부분을 찾는다.
 
-현재 Kelvin 예제와 독립 mesh planner는 이 규칙 일부를 확인한다. Direct Phase 1은 Pad 파일을
-복사하지 않고 사각형 Pad를 다시 만들며, DUT와 Pad 사이를 한 폭의 box로 연결한다. 두 경로는 아직
-서로 연결되지 않았다.
+현재 Kelvin 예제와 mesh compiler가 이 규칙 일부를 확인한다. Direct Phase 1도 계산한 중심 경로를
+최소 2개의 평행선과 가로 연결선으로 바꾼다. 꺾이는 곳과 양 끝의 연결도 검사한다.
+
+다만 Direct Phase 1의 Pad는 사용자가 준 Pad 파일이 아니다. Frame과 Pad 개수로 다시 만든 사각형이다.
+따라서 mesh 연결은 구현됐지만, 실제 Pad와 transistor를 함께 쓴 완성 흐름은 아니다.
 
 ## Transistor TEG
 
@@ -93,6 +95,24 @@ conceptual fixture가 있을 뿐 실제 transistor 생성 경로에 통합돼 �
 공정별 transistor 생성에는 별도 adapter가 필요하다. Adapter는 승인된 PCell이나 Reference GDS를
 사용해야 하며, stock checkout에는 이 adapter가 없다.
 
+## 여러 DUT가 든 예시 GDS를 배우는 흐름
+
+사용자는 여러 DUT가 든 GDS와 각 DUT의 parameter 표를 함께 줄 수 있다.
+
+예를 들어 Gate length, CPP, Width, nFin, cell height를 DUT별로 적는다. Terminal과 layer의 의미도
+함께 알려줘야 한다. 이 정보가 빠지거나 서로 맞지 않으면 MCP는 문제가 있는 항목과 고치는 방법을
+구체적으로 알려준다.
+
+MCP는 DUT 사이에서 항상 같은 도형 특징을 찾아 drawing style 후보로 기록한다. 같은 parameter인데
+도형이 다른 DUT가 있으면 어느 DUT를 따를지 사용자에게 묻는다. 차이를 몰래 평균내지 않는다.
+
+새로 재현한 DUT GDS가 있으면 원본 DUT와 비교해 점수를 낼 수 있다. 학습에 쓰지 않은 holdout DUT도
+따로 검사한다. 통과한 결과는 공정과 버전별 adapter 후보로 저장해 다음 작업에서 다시 찾을 수 있다.
+
+이 과정은 CPP가 바뀔 때 Gate, Active, Contact가 어떻게 함께 움직이는지 자동으로 알아내는 기능은
+아니다. 현재는 입력 검사, 비교, 질문, 점수 계산과 후보 저장까지 구현돼 있다. 실제 DUT를 만드는
+공정별 compiler는 별도로 필요하다.
+
 ## PCellizer
 
 PCell은 치수를 바꿔 다시 만들 수 있는 도형 묶음이다.
@@ -104,8 +124,11 @@ PCellizer는 기존 GDS에서 바꿀 direct box를 고른다. 사용자는 ruler
 
 원본의 계층 구조는 유지한다. Mirroring, array, 여러 cell 조합도 occurrence 경로와 transform으로 구분한다.
 
-현재 PCellizer는 제한된 첫 버전이다. Non-array occurrence의 선택한 box 한 축과 parameter key 하나가
+현재 PCellizer는 제한된 기존 도구다. Non-array occurrence의 선택한 box 한 축과 parameter key 하나가
 지원 범위다. Array member specialization과 W×L dependent-shape 변경은 지원하지 않는다.
+
+따라서 실제 transistor adapter는 이 PCellizer를 확장하는 방식으로 만들지 않는다. 위의 여러 DUT
+corpus를 바탕으로 별도의 공정별 compiler를 만들고 검증하는 방향을 사용한다.
 
 ## Reference Library
 
@@ -139,8 +162,10 @@ Skill이 없어도 MCP 서버는 실행된다. 다른 컴퓨터에서는 저장�
 - `tests/`: 같은 입력이 같은 결과를 내는지 확인하는 검사
 - `output/`: 작업 중 만든 결과를 두는 공간
 
-원본과 기준 GDS는 입력으로 수정하지 않는다. 새 결과는 다른 이름과 경로에 저장하고, 같은 output을
-동시에 만드는 작업은 아직 안전하지 않으므로 agent/process마다 경로를 나누거나 직렬화한다.
+원본과 기준 GDS는 입력으로 수정하지 않는다. 새 결과는 다른 이름과 경로에 저장한다. 지원하는
+같은 컴퓨터의 local filesystem에서는 여러 작업이 같은 새 경로를 동시에 만들 때 첫 결과만 남긴다.
+뒤 작업은 기존 결과를 덮어쓰거나 지우지 않는다. NFS, SMB와 여러 컴퓨터가 함께 쓰는 경로는 아직
+지원하지 않는다.
 
 ## 현재 할 수 있는 일
 
@@ -149,6 +174,10 @@ Skill이 없어도 MCP 서버는 실행된다. 다른 컴퓨터에서는 저장�
 - Kelvin M1 예제를 같은 도형으로 다시 만든다.
 - 두 layout의 도형 차이를 비교한다.
 - Reference GDS에서 보이는 drawing style을 정리한다.
+- 실제 Pad macro를 수정하지 않고 별도 top cell에 배치한다.
+- 여러 labeled DUT를 등록하고 누락 정보와 설명되지 않은 차이를 찾는다.
+- 재현 DUT를 train/holdout으로 나눠 비교하고 공정별 adapter 후보를 저장한다.
+- Direct Phase 1의 계산 경로를 여러 rail과 cross-tie가 있는 mesh로 바꾼다.
 - 제한된 PCell split batch를 만든다.
 - 작업 상태와 입력 근거를 파일로 남긴다.
 
@@ -157,8 +186,9 @@ Skill이 없어도 MCP 서버는 실행된다. 다른 컴퓨터에서는 저장�
 - 처음 보는 공정의 규칙을 스스로 알아내지 못한다.
 - 이름과 색만 보고 layer 용도를 확정하지 못한다.
 - 공정 adapter 없이 production transistor를 만들지 못한다.
-- 실제 pad macro를 보존한 채 Phase 1에 넣지 못한다.
-- 21-DUT 장거리 mesh를 bounded global routing으로 만들지 못한다.
+- 실제 Pad macro, corpus 기반 transistor와 mesh 배선을 하나의 자동 Phase 1 작업으로 묶지 못한다.
+- 실제 21-DUT와 84개 연결을 사용한 배선 시간과 성공률을 아직 검증하지 못했다.
+- 예시 DUT만 보고 CPP와 연결된 모든 도형 변경 규칙을 자동으로 만들지 못한다.
 - 내부 검사만으로 DRC, LVS, PEX 통과를 선언하지 못한다.
 - GDS가 실제 wafer 측정에 준비됐다고 혼자 승인하지 못한다.
 
@@ -170,8 +200,10 @@ DRC는 도형 규칙 검사다. LVS는 도면과 회로 연결 비교다. PEX는
 
 1. Python, `uv`, KLayout을 설치한다.
 2. MCP host에 이 저장소의 실행 명령을 등록한다.
-3. `onboarding.md`의 공정 입력을 준비한다.
-4. 실제 adapter와 pad/routing integration이 준비된 공정만 대표 DUT 하나로 pilot GDS를 만든다.
-5. KLayout에서 pilot을 확인한 뒤 전체 split을 만든다.
+3. `onboarding.md`의 공정 입력, 실제 Pad macro와 labeled DUT 표를 준비한다.
+4. Pad와 DUT corpus를 등록하고, 누락 정보와 DUT별 차이를 먼저 해결한다.
+5. 공정별 compiler가 만든 DUT를 원본과 holdout으로 비교해 adapter 후보를 등록한다.
+6. 실제 adapter와 Pad/mesh 연결이 준비된 공정만 대표 DUT 하나로 pilot GDS를 만든다.
+7. KLayout과 foundry 검증 환경에서 pilot을 확인한 뒤 전체 split을 만든다.
 
-첫 작업은 `onboarding.md`의 입력 표를 채우고 대표 DUT 한 개로 pilot GDS를 만드는 것이다.
+첫 작업은 `onboarding.md`의 입력 표와 예시 DUT별 parameter 표를 채우는 것이다.

@@ -5,9 +5,10 @@ production/fabrication-approved process profile이 내장되어 있지 않다. P
 research-only Kelvin demo profile은 target PDK가 아니다. 예제 GDS, 이름이 비슷한 layer, display color,
 다른 node의 rule 또는 LLM의 상식으로 공정값을 채우지 않는다.
 
-> 이 문서는 target-process adapter를 **준비하기 위한 입력 계약**이다. 현재 checkout은 profile 사실을
-> 수집·검증할 수 있지만 stock만으로 transistor pilot까지 완료할 수 없다. 실제 transistor adapter,
-> pad-macro-preserving Phase 1 composer와 Phase 1 mesh integration이 없기 때문이다. 현재 구현 경계는
+> 이 문서는 target-process adapter를 **준비하기 위한 입력 계약**이다. 현재 checkout은 실제 Pad macro를
+> 보존해 overlay하고, labeled DUT corpus를 검사·score·등록하며, legacy Phase 1 route를 mesh로 만들 수
+> 있다. Stock만으로 transistor pilot까지 완료할 수는 없다. Corpus의 dependent geometry를 만드는 실제
+> transistor compiler와 Pad/DUT/route를 묶는 target-process engine이 없기 때문이다. 현재 구현 경계는
 > [docs/current-capability-boundaries.md](docs/current-capability-boundaries.md)를 따른다.
 
 ## 완료 조건
@@ -20,7 +21,9 @@ Onboarding 완료는 다음 artifact가 서로 일치할 때만 선언한다.
 4. PDK와 분리된 organization measurement preset.
 5. 사용자가 KLayout에서 확인한 node별 reference selection.
 6. `validate_process_capability_profile`을 통과한 schema-v1 capability.
-7. 타깃 공정 primitive adapter와 대표 pilot GDS의 fresh-reload 검증.
+7. 실제 Pad를 쓰는 경우 immutable Pad macro artifact와 access-layer edge landing.
+8. Transistor를 쓰는 경우 labeled DUT corpus, variation resolution, sealed holdout score와 exact adapter candidate.
+9. 타깃 공정 primitive compiler/adapter와 대표 pilot GDS의 fresh-reload 검증.
 
 Schema 통과만으로 production, 측정 가능성 또는 sign-off를 선언하지 않는다.
 
@@ -75,8 +78,10 @@ Layermap만으로 width/space/contact rule 또는 connectivity를 추론하지 �
 매 작업마다 바뀌므로 profile에 넣지 않는다.
 
 - Frame 크기, origin과 allowed boundary.
+- Pad macro source/top/access layer/instance transform 또는 승인된 Pad geometry.
 - Pad count/rows/outline/pitch/numbering/reserved role.
 - DUT 종류·개수·split table과 W/L/DOE/LDE axes.
+- Example DUT cell별 parameter row, topology, terminal mapping과 sealed holdout.
 - Terminal→net→Pad와 bias/safety contract.
 - Routing layer, obstacle, corridor와 optional project max width.
 - Reference selection, output 경로와 authorization state.
@@ -98,6 +103,8 @@ first-metal 우선이다. 이것은 PDK 사실이 아니며 작업별 변경을 
 6) organization preset 파일을 사용할까, terminal/measurement convention을 지금 확인할까?
 7) frame/Pad/DUT split/terminal-Pad/bias/obstacle/output 중 기본 후보와 다른 항목은?
 8) 참고할 node별 full reference GDS와 사용자가 확인할 KLayout top/occurrence는?
+9) 실제 Pad macro의 top/access layer/instance transform은 무엇인가?
+10) Example DUT별 cell/parameter/terminal 표와 holdout DUT는 무엇인가?
 ```
 
 W/L 또는 width/length가 나오면 다음 의미를 반드시 확인한다.
@@ -194,10 +201,48 @@ Adapter acceptance:
 Adapter가 없으면 LLM은 “transistor primitive adapter 미구현”을 보고하고 resistor/capacitor 또는
 read-only reference 분석처럼 가능한 작업만 계속한다.
 
+### Example DUT corpus로 candidate를 준비하는 현재 경로
+
+여러 DUT가 든 source GDS와 DUT별 parameter 정보를 다음 순서로 등록할 수 있다.
+
+```text
+onboard_transistor_corpus
+→ resolve_transistor_corpus
+→ 외부 compiler가 reproduced GDS 생성
+→ score_transistor_adapter
+→ build_transistor_adapter_candidate
+→ register_transistor_adapter_candidate
+```
+
+`parameter_schema`에는 Gate length, CPP, planar width, nFin, cell height와 필요한 추가 축을 이름/단위/
+numeric kind로 등록한다. 각 `dut_record`는 exact cell name, 모든 parameter 값, topology와 terminal
+landing/layer mapping을 가져야 한다. 최소 한 DUT는 fitting 전에 sealed holdout으로 분리한다.
+
+Corpus onboarding은 observed invariant style과 same-parameter/different-geometry variation을 찾는다.
+설명되지 않은 차이는 사용자가 따를 reference DUT를 선택하기 전까지 clarification 상태로 남긴다.
+Reproduced GDS score가 통과해도 candidate 상태는 `candidate_scored_not_foundry_qualified`다.
+
+현재 경로는 CPP가 바뀔 때 Gate/Active/Contact/implant/terminal을 함께 움직이는 dependency recipe나
+callable PCell을 자동 생성하지 않는다. 실제 compiler identity/code hash는 candidate에 결속되지만,
+compiler 구현과 foundry 검증은 외부에서 제공해야 한다.
+
+### 실제 Pad macro를 준비하는 현재 경로
+
+```text
+register_pad_macro
+→ source stream/top cell/DBU/access layer/instance transform 고정
+→ eligible edge landing 확인
+→ compose_registered_pad_macro
+```
+
+Composer는 source Pad subtree를 수정하지 않고 새 top에 instance로 넣는다. DUT와 routing은 별도
+operation으로만 추가한다. 이 overlay는 legacy Phase 1 synthetic Pad composer와 아직 연결돼 있지 않다.
+
 ## 6. Target TEG drawing contract를 확인한다
 
-이 절은 adapter와 composer가 충족해야 할 acceptance 조건이다. Stock Phase 1의 현재 동작 설명이
-아니며, 현재 composer는 실제 pad macro나 standalone mesh result를 입력받지 않는다.
+이 절은 adapter와 composer가 충족해야 할 acceptance 조건이다. Stock Phase 1은 synthetic Pad를 쓰지만
+route polyline을 multi-rail mesh로 compile한다. Immutable Pad overlay 경로는 별도로 구현돼 있으며,
+현재 target-process engine은 actual Pad, corpus-derived DUT와 mesh route를 한 결과로 묶지 않는다.
 
 - Routing은 horizontal/vertical Manhattan만 허용하며 diagonal은 사용하지 않는다.
 - 측정 metal 이외의 장거리 routing은 넓은 parallel rail과 repeated cross-tie mesh를 사용한다.
@@ -223,9 +268,9 @@ reference와 사용자 승인으로 보완한다.
 
 ## 7. Representative pilot을 수행한다
 
-이 단계는 stock에서 보장하는 turnkey 절차가 아니라 외부 process adapter/composer/router를 검증하는
-acceptance gate다. Transistor adapter, 실제 pad macro 보존과 mesh-aware routing이 준비되지 않았다면
-`not_ready`로 끝내고 conceptual scaffold로 대체하지 않는다.
+이 단계는 stock에서 보장하는 turnkey 절차가 아니라 외부 process adapter와 통합 engine을 검증하는
+acceptance gate다. Actual transistor compiler, registered Pad macro와 실제 DUT/Pad port를 쓰는 mesh
+routing이 하나의 flow로 준비되지 않았다면 `not_ready`로 끝내고 conceptual scaffold로 대체하지 않는다.
 
 전체 split 전에 가장 작은 pilot으로 다음을 확인한다.
 
@@ -251,6 +296,9 @@ LLM은 마지막에 다음 표를 채운다.
 | Required rules | complete / partial | rule source |  |
 | Organization preset | confirmed / missing | file + hash |  |
 | Reference | user-confirmed / candidate / none | selection id |  |
+| Pad macro | registered / missing / not applicable | package hash + edge landing |  |
+| DUT corpus | resolved / clarification required / missing | corpus/resolution hash |  |
+| Adapter score | passed / failed / not run | scorecard + holdout hash |  |
 | Device adapters | ready / partial / absent | adapter id |  |
 | Pilot | fresh-reload verified / not run / failed | GDS path + hash |  |
 | Production evidence | outside scope / attached | policy receipt |  |

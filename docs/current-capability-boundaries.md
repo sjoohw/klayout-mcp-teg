@@ -1,11 +1,12 @@
 # Current capability boundaries
 
-이 문서는 **현재 working tree가 실제로 실행하는 stock 동작**만 설명한다. 목표 계약은
+이 문서는 **현재 main checkout이 실제로 실행하는 stock 동작**만 설명한다. 목표 계약은
 [contracts-and-production.md](contracts-and-production.md), 구현 계획은
 [upgrade_plan.md](../upgrade_plan.md)에서 별도로 관리한다.
 
-비교 기준선은 `main` commit `1df82b5043a41cf1485bdc7e1bf43c9a2930d1cf`, 2026-09-02 KST다.
-이후의 working-tree 보정은 아래에서 별도 snapshot으로 표시한다.
+현재 코드 구현 기준선은 commit `7a7348268c8af2593e59d2a1c6d434b32c0fb087`, 2026-09-02 KST다.
+이후 문서 동기화 commit은 코드 동작을 바꾸지 않는다. 과거 review 기준선
+`1df82b5043a41cf1485bdc7e1bf43c9a2930d1cf`는 validation 표에만 남긴다.
 등록된 tool, schema 또는 planning contract가 있다는 사실은 target-process readiness를 뜻하지 않는다.
 
 ## 한 문장 판정
@@ -46,7 +47,7 @@ transistor generator와 foundry DRC에 연결한 stock E2E는 없다.
 현재 mode는 tool schema/list만 줄이고 server instruction은 공통이다. 따라서 mode 권장은 exact
 Gemma4 또는 다른 제한 모델의 성공률 검증이 아니다.
 
-이 경계 metadata를 반영한 working tree 재계측은 다음과 같다. 전체 record는 compact, sorted-key
+이 경계 metadata를 반영한 HEAD 재계측은 다음과 같다. 전체 record는 compact, sorted-key
 JSON의 serialized `tools/list` 길이이며 `inputSchema` 길이와 구분한다.
 
 | Mode | Tools | 전체 `tools/list` chars | `inputSchema` chars |
@@ -78,8 +79,8 @@ conceptual geometry를 주입해 완료시켜도 실제 transistor workflow가 �
 immutable pad macro artifact와 corpus-derived transistor adapter를 받는 production handoff가 없다.
 
 따라서 `complete_verified_nonproduction`, `fresh_reload_verified` 또는 `production_ready=false`는
-요청한 파일/geometry handoff의 무결성만 뜻한다. 실제 pad macro, mesh contract, DRC/LVS/PEX,
-측정 가능성이나 release readiness의 증거가 아니다.
+요청한 파일/geometry handoff의 무결성만 뜻한다. 실제 Pad/DUT landing을 사용한 route acceptance,
+DRC/LVS/PEX, 측정 가능성이나 release readiness의 증거가 아니다.
 
 ## 목표 계약과 구현 보장의 구분
 
@@ -102,9 +103,9 @@ Pad macro/DUT adapter와 full-PDK DRC/PEX를 연결하지 않았으므로 이를
   `teg_plan`에서 planning 전에 중단된다. 임의 target/production profile에는 trusted verifier 외에도
   matching ProcessCapabilityProvider, planning/generation engine, runner와 policy가 필요하다.
 - Bundled Kelvin demo는 Python에서 test-only component를 직접 조립하는 nonproduction regression이다.
-- Research-only Kelvin planning/generation engine과 외부 JSON report normalization/binding contract는
-  있다. Target-production transistor planning/generation engine, 실제 padset composer, foundry
-  DRC/LVS/PEX **execution runner**와 production host bootstrap은 없다.
+- Research-only Kelvin planning/generation engine, immutable Pad overlay와 외부 JSON report
+  normalization/binding contract는 있다. Target-production transistor planning/generation engine,
+  Pad/DUT/route 통합 composer, foundry DRC/LVS/PEX **execution runner**와 production host bootstrap은 없다.
 - `layout_signoff_evidence_approved`는 layout evidence 상태일 뿐이며 현재 모든 workflow의
   `production_ready`는 false다.
 
@@ -116,10 +117,11 @@ Pad macro/DUT adapter와 full-PDK DRC/PEX를 연결하지 않았으므로 이를
 |---|---|---|---|
 | Baseline commit | `1df82b5043a41cf1485bdc7e1bf43c9a2930d1cf` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `646 passed, 1 warning` | 과거 local diagnostic |
 | Baseline remote CI | 같은 baseline SHA의 [Actions run 33589034379](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33589034379) | pytest 5개 job 실패, csh smoke만 성공 | baseline release verdict는 red |
-| Upgrade implementation working tree | baseline 이후 uncommitted changes | 같은 로컬 환경: `702 passed, 1 warning` | local regression일 뿐 release evidence 아님 |
+| Upgrade implementation | `7a7348268c8af2593e59d2a1c6d434b32c0fb087` | 같은 로컬 환경: `702 passed, 1 warning` | local regression |
+| Upgrade remote CI | 같은 upgrade SHA의 [Actions run 33617837011](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33617837011) | Windows 2개, wheel, csh 성공; Ubuntu 2개와 KLayout integration은 동일 OS 안내문 test 1건 실패 | current release verdict는 red |
 
-Working-tree 결과는 아직 commit과 동일 SHA의 remote CI 결과가 아니므로 cross-platform qualification으로
-인용하지 않는다. Local pass와 remote CI green은 별도 조건이다.
+Local pass와 remote CI green은 별도 조건이다. 현재 SHA의 remote CI가 red이므로 cross-platform
+qualification으로 인용하지 않는다.
 
 `feedback.md`와 `answer.md`는 각 검토 시점의 historical record다. 현재 상태의 권위 있는 요약은
 이 문서, 현재 코드/테스트와 동일 SHA의 CI 결과이며, 다음 구현 순서는

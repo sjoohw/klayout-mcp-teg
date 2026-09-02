@@ -159,6 +159,9 @@ production readiness가 아니며, 처음 사용하는 host 예제는 의도적�
 | 불완전한 transistor/resistor/capacitor TEG 요청의 intake/questions | `plan_direct_measurement_teg` — drawing 없음, transistor adapter 없음 |
 | Kelvin reference 재현 | `plan_kelvin_m1_routing` |
 | Existing GDS parameterization | `inventory_pcellizer_hierarchy` |
+| 실제 Pad macro 등록·보존 배치 | `register_pad_macro` → `compose_registered_pad_macro` |
+| Labeled DUT corpus 등록·차이 해결·score | `onboard_transistor_corpus` → `resolve_transistor_corpus` → `score_transistor_adapter` |
+| Scored adapter 후보 저장 | `build_transistor_adapter_candidate` → `register_transistor_adapter_candidate` |
 | Process-node reference 등록 | `register_reference_layout` |
 | Resumable host job | `teg_intake` |
 
@@ -241,8 +244,9 @@ MeasurementManifest binding을 확인하지만 production 또는 tester readines
 ## 핵심 drawing 원칙
 
 아래 항목은 direct-measurement layout의 **목표 acceptance contract**이며 모든 stock workflow가 이미
-구현한다는 뜻이 아니다. 현재 Phase 1은 실제 pad macro를 보존하지 않고 DUT–Pad 장거리 route를
-single-width box로 만들며 standalone mesh/contact compiler를 소비하지 않는다.
+구현한다는 뜻이 아니다. 현재 Phase 1은 실제 pad macro를 보존하지 않지만, 계산된 DUT–Pad polyline의
+각 segment를 multi-rail mesh로 compile한다. 실제 Pad macro와 corpus 기반 transistor adapter를 이
+route에 연결한 target-process E2E는 아직 없다.
 
 - 원본과 reference를 변경하지 않고 새 output만 만든다.
 - DBU와 `(layer, datatype)`을 명시하며 display color로 production layer를 추측하지 않는다.
@@ -313,15 +317,17 @@ polarity와 frequency를 DesignIntent와 정확히 대조한다. Timing, environ
 - Input은 snapshot/hash 후 읽는다.
 - Persistent output은 새 basename과 host-controlled root를 사용한다. Generic drawing은 사용자가
   지정한 기존 parent directory에 쓸 수 있으므로 같은 정책 범위로 간주하지 않는다.
-- Generic Manhattan drawing은 fsync된 sibling stage를 create-only hard link로 publish해 local
-  same-target winner를 보존한다. Style/overlay와 content-document/persistent final은 아직 이 helper로
-  이전되지 않았으므로 같은 target/job 호출을 외부에서 직렬화한다.
+- 공개 file writer와 content-addressed directory writer는 fsync된 sibling stage를 create-only로
+  publish한다. 지원 local filesystem의 same-target 경쟁에서는 첫 winner를 보존한다.
 - 단일 writer는 file write와 fresh KLayout reload 후에만 성공한다.
 - Persistent manifest는 append-only, content-addressed ancestry를 사용한다.
 - Job ID는 lowercase `[a-z0-9_-]`만 허용하고 Windows device alias를 거부한다.
-- Generation은 verified staging manifest를 먼저 남기고 sibling temp+replace로 final을 승격한다.
+- Generation은 verified staging manifest를 먼저 남기고 sibling stage를 create-only로 final에 승격한다.
 - 동일 local job의 manifest-head append는 OS file lock과 expected-parent 비교로 직렬화한다.
-  Content-addressed document publish의 same-digest 동시 생성은 아직 별도 race 경계다.
+- 동일 digest의 content object는 idempotent하게 재사용하고, 같은 이름의 다른 content는 conflict로
+  거부한다.
+- 보장 범위는 same-host local NTFS/ext4/XFS 계약이다. NFS/SMB/multi-host writer는 doctor에서
+  fail-closed하며 실제 ext4/XFS와 unsupported mount qualification은 아직 남아 있다.
 - Expected 업무 오류는 MCP `isError=true`와 code/message/details/next_action을 반환한다.
 
 대표 복구:

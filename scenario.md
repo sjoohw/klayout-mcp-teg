@@ -32,7 +32,7 @@ probe-card 규격이라는 뜻이 아니다. 실제 공정에는 승인된 layer
 
 ## 시나리오 A — 실제 타깃 공정 온보딩
 
-**지원 수준: Stock 미지원; process-specific host 구현이 있을 때만 조건부 가능**
+**지원 수준: 입력 등록은 Stock 가능; 완성 transistor pilot은 process-specific host 구현이 있을 때만 가능**
 
 MCP는 내장 공정값을 제공하지 않는다. 타깃 LLM은 다음 순서를 따른다.
 
@@ -42,7 +42,9 @@ describe_pdk_profile_inputs
 → organization preset과 drawing-job 입력 분리
 → validate_process_capability_profile
 → 사용자 확인 reference 등록·열람
-→ process-specific primitive adapter 검증
+→ immutable Pad macro 등록
+→ labeled DUT corpus/variation/holdout score 등록
+→ process-specific compiler와 primitive adapter 검증
 → representative pilot drawing/fresh reload
 ```
 
@@ -50,11 +52,41 @@ Unknown layer/rule/device geometry는 추정하지 않는다. Frame 2000×54 µm
 first-metal 우선과 direct measurement는 조직 기본값 후보이며 PDK 사실이 아니다. Transistor는
 타깃 공정 adapter가 준비되기 전에는 geometry 생성을 시작하지 않는다.
 
-여기서 필요한 host 구현에는 실제 transistor primitive adapter, pad macro hierarchy/stack을 보존하는
-composer, bounded mesh-aware global router와 foundry verification runner가 포함된다. Profile JSON과
-reference GDS를 제공하는 것만으로 이 구현이 생기지 않는다.
+Stock에는 Pad macro hierarchy를 보존하는 overlay, corpus candidate registry, bounded router budget과
+polyline mesh compiler가 있다. 아직 필요한 host 구현은 corpus parameter를 실제 geometry로 만드는
+transistor compiler, Pad/DUT/route 통합 engine과 foundry verification runner다. Profile JSON과
+reference GDS만 제공해서 이 구현이 생기지는 않는다.
 
-## 시나리오 B — SLN001 Kelvin 6-split 재현과 XOR
+## 시나리오 B — 실제 Pad macro 보존 overlay
+
+**지원 수준: Stock 실행 가능, nonproduction composition**
+
+```text
+register_pad_macro
+→ source Pad cell, DBU, access layer와 instance 위치 고정
+→ compose_registered_pad_macro
+→ source Pad subtree fingerprint와 fresh reload 확인
+```
+
+새 top cell에 Pad instance와 별도 DUT/routing box를 넣는다. Source Pad 내부의 metal, via와 passivation은
+수정하지 않는다. 이 결과만으로 actual transistor와 21-DUT routing E2E를 뜻하지 않는다.
+
+## 시나리오 C — Labeled DUT corpus와 adapter 후보
+
+**지원 수준: Stock 분석·score·registry 가능, compiler 구현은 외부 필요**
+
+```text
+onboard_transistor_corpus
+→ 설명되지 않은 DUT 차이를 사용자 선택으로 해결
+→ 외부 compiler의 reproduced GDS를 train/holdout score
+→ candidate package build/register
+```
+
+Parameter schema는 Gate length, CPP, Width, nFin, cell height 등 여러 축을 받을 수 있다. 하지만
+현재 Stock은 이 표에서 CPP 연계 Gate/Active/Contact 변경식을 자동 합성하지 않는다. 등록 결과는
+`candidate_scored_not_foundry_qualified`이며 actual transistor adapter나 foundry 승인이 아니다.
+
+## 시나리오 D — SLN001 Kelvin 6-split 재현과 XOR
 
 **지원 수준: Stock 실행 가능, nonproduction regression**
 
@@ -87,7 +119,7 @@ mesh, aligned full-width 90° joint와 multiple Pad landing을 사용한다.
 recursive geometry XOR 0이다. 이는 이 **특정 regression reference와 geometry가 같다**는 뜻이며,
 다른 공정 규칙 준수, contact-resistance 구조 또는 foundry 승인이라는 뜻은 아니다.
 
-## 시나리오 C — Reference precedent marker 분류
+## 시나리오 E — Reference precedent marker 분류
 
 **지원 수준: 조건부 가능, advisory only**
 
@@ -139,9 +171,9 @@ wafer traceability는 현재 repository에 없다.
 
 ## 현재 Roadmap
 
-- 실제 transistor primitive adapter와 production registry.
-- 실제 pad macro hierarchy/stack 보존형 composition.
-- Bounded 21-DUT global mesh routing과 Phase 1 통합.
+- Corpus dependency recipe를 materialize하는 실제 transistor primitive compiler.
+- Actual Pad macro, corpus-derived DUT와 mesh route의 persistent engine 통합.
+- Supplied Pad/DUT port를 쓰는 21-DUT, 84-connection routing acceptance.
 - 임의 hierarchy/composite DUT의 multi-parameter PCell 자동 추론.
 - 승인된 process electrical model을 사용한 target R/C synthesis.
 - 조직별 DRC/LVS/PEX adapter와 waiver authority 연결.
