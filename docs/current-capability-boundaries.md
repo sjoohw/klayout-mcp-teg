@@ -4,7 +4,7 @@
 [contracts-and-production.md](contracts-and-production.md), 구현 계획은
 [upgrade_plan.md](../upgrade_plan.md)에서 별도로 관리한다.
 
-현재 코드 구현 기준선은 commit `c4d456481a214cf380e91e507aed92c1f77e03f8`이다. 이후 이 검증 결과를
+현재 코드 구현 기준선은 commit `afd90cd7dbdfdac4ca4d76bee8a5a6ee583fde80`이다. 이후 이 검증 결과를
 기록하는 문서 전용 commit은 코드 동작을 바꾸지 않는다. 과거 review 기준선과 중간 upgrade SHA는
 validation 표에만 남긴다.
 등록된 tool, schema 또는 planning contract가 있다는 사실은 target-process readiness를 뜻하지 않는다.
@@ -121,8 +121,10 @@ Pad macro/DUT adapter와 full-PDK DRC/PEX를 연결하지 않았으므로 이를
 | Upgrade implementation | `7a7348268c8af2593e59d2a1c6d434b32c0fb087` | 같은 로컬 환경: `702 passed, 1 warning` | local regression |
 | Upgrade remote CI | 같은 upgrade SHA의 [Actions run 33617837011](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33617837011) | Windows 2개, wheel, csh 성공; Ubuntu 2개와 KLayout integration은 동일 OS 안내문 test 1건 실패 | current release verdict는 red |
 | Review hardening | `c4d456481a214cf380e91e507aed92c1f77e03f8` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `708 passed, 1 warning`; [Actions run 33626068843](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33626068843) 전체 green | Windows/Ubuntu 3.11·3.13, wheel, csh, KLayout 0.30.10 통합 통과 |
+| Evidence hardening | `afd90cd7dbdfdac4ca4d76bee8a5a6ee583fde80` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `715 passed, 1 warning` | Lifecycle chain/content-address/schema 회귀 통과; 동일 코드 SHA의 remote CI는 별도 확인 |
 
-Local pass와 remote CI green은 별도 조건이다. 위 review-hardening SHA는 두 조건을 모두 통과했다.
+Local pass와 remote CI green은 별도 조건이다. Review-hardening SHA는 두 조건을 모두 통과했으며,
+evidence-hardening SHA는 remote CI 확인 전까지 local regression 결과로만 인용한다.
 이는 repository regression 기준선이며 실제 target transistor/foundry qualification을 뜻하지 않는다.
 
 `feedback.md`와 `answer.md`는 각 검토 시점의 historical record다. 현재 상태의 권위 있는 요약은

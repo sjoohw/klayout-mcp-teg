@@ -36,7 +36,7 @@ LLM orchestration 지침도 저장소에 함께 둔다. 범용 GDS/PCell 작업�
 | Reference style 추출 | 가능 | hierarchy/layer/직교성/치수 빈도 관측; rule·net·전기 특성 추론 없음 |
 | Direct-measurement Phase 1 | 제한된 nonproduction scaffold | Transistor adapter 없음, Pad 재합성; bounded polyline은 multi-rail mesh로 compile |
 | Pad macro onboarding | 지원 | Source cell을 immutable artifact로 등록하고 새 top에서 instance overlay; Phase 1과는 아직 미연결 |
-| Transistor corpus onboarding | 지원 | Labeled DUT coverage/style/variation과 logical validation score; 원본 안에서 나눈 검증군이며 sealed 평가·신규 공정 PCell·foundry 승인은 아님 |
+| Transistor corpus onboarding | 지원 | Integer/terminal/topology 입력 검증과 content-addressed resolution/score/compiler 결속; distinct stream 비교일 뿐 실행 receipt·sealed 평가·신규 공정 PCell·foundry 승인은 아님 |
 | Persistent `teg_intake` | 제한 지원 | Stock은 bundled research-only Kelvin resistor profile/version에 한정; 임의 target은 host provider 필요 |
 | Persistent plan/generate/verify | Host 통합 필요 | Target-production verifier/provider/engine과 external runner/policy 필요 |
 | Foundry sign-off·PCM release | 불가 | 실제 PDK/deck/probe/scribe/조직 정책 필요 |
@@ -45,6 +45,8 @@ LLM orchestration 지침도 저장소에 함께 둔다. 범용 GDS/PCell 작업�
 DesignIntent↔MeasurementManifest actual source/program/compliance/timing/safety 결속,
 host-policy-selected external evidence 결속, durable generation staging과 job별 append 직렬화가 구현됐다.
 `signoff_evidence_approved`는 layout evidence 승인일 뿐이며 `production_ready`를 true로 만들지 않는다.
+Technology adapter lifecycle은 package별 단조 sequence와 이전 record hash를 사용한다. `recorded_at`은
+정렬 기준이 아니며 revoke는 해당 exact package의 terminal state다.
 
 현재 가장 중요한 미비사항:
 
