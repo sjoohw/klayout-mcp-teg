@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import shutil
 import tempfile
 from typing import Any, Mapping
@@ -22,6 +23,19 @@ from .validation_report import ActionableIssue, ClarificationQuestion, Validatio
 from .workflow_manifest import canonical_json_bytes, canonical_sha256, immutable_json_copy
 
 
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+ADAPTER_IDENTITY_FIELDS = frozenset(
+    {
+        "technology",
+        "pdk_revision",
+        "adapter_kind",
+        "device_family",
+        "topology",
+        "package_version",
+    }
+)
+
+
 def _fail(code: str, message: str, *, details: Mapping[str, Any], next_action: str) -> None:
     raise AnalysisError(
         code=code,
@@ -33,11 +47,20 @@ def _fail(code: str, message: str, *, details: Mapping[str, Any], next_action: s
 
 def _validate_inputs(
     *,
+    topology: str,
     parameter_schema: Mapping[str, Any],
     dut_records: list[Mapping[str, Any]],
     layer_roles: Mapping[str, Any],
     validation_dut_ids: list[str],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    if not isinstance(topology, str) or not topology.strip():
+        _fail(
+            "DUT_CORPUS_TOPOLOGY_REQUIRED",
+            "The corpus requires one explicit non-empty topology.",
+            details={"field": "topology", "value": topology},
+            next_action="Provide the exact topology shared by every DUT record.",
+        )
+    normalized_topology = topology.strip()
     if not isinstance(parameter_schema, Mapping) or not parameter_schema:
         _fail(
             "DUT_PARAMETER_SCHEMA_REQUIRED",
@@ -114,12 +137,20 @@ def _validate_inputs(
             for name, value in parameters.items()
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value))
         )
-        if missing or unexpected or invalid:
+        nonintegral = sorted(
+            name
+            for name, value in parameters.items()
+            if name in schema
+            and schema[name]["kind"] == "integer"
+            and name not in invalid
+            and not float(value).is_integer()
+        )
+        if missing or unexpected or invalid or nonintegral:
             _fail(
                 "DUT_PARAMETER_ROW_INVALID",
-                "A DUT parameter row is incomplete or contains a non-numeric value.",
-                details={"field": f"{field}.parameters", "dut_id": dut_id, "missing": missing, "unexpected": unexpected, "invalid": invalid},
-                next_action="Match the parameter schema exactly and provide finite numeric values.",
+                "A DUT parameter row is incomplete or violates its declared numeric kind.",
+                details={"field": f"{field}.parameters", "dut_id": dut_id, "missing": missing, "unexpected": unexpected, "invalid": invalid, "nonintegral": nonintegral},
+                next_action="Match the parameter schema exactly; integer parameters must be whole numbers.",
             )
         if not isinstance(terminals, Mapping) or not terminals:
             _fail(
@@ -128,14 +159,45 @@ def _validate_inputs(
                 details={"field": f"{field}.terminals", "dut_id": dut_id},
                 next_action="Provide the G/D/S/B (or device-specific) terminal mapping; it is never inferred silently.",
             )
+        invalid_terminals = sorted(
+            str(name)
+            for name, definition in terminals.items()
+            if not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(definition, Mapping)
+            or not isinstance(definition.get("layer_role"), str)
+            or not definition.get("layer_role", "").strip()
+        )
+        if invalid_terminals:
+            _fail(
+                "DUT_TERMINAL_MAPPING_INVALID",
+                "Each terminal requires a non-empty name and layer_role.",
+                details={"field": f"{field}.terminals", "dut_id": dut_id, "invalid_terminals": invalid_terminals},
+                next_action="Map every terminal to an explicit semantic layer_role.",
+            )
+        record_topology = record.get("topology")
+        if not isinstance(record_topology, str) or record_topology.strip() != normalized_topology:
+            _fail(
+                "DUT_TOPOLOGY_MISMATCH",
+                "Every DUT record must match the corpus topology exactly.",
+                details={"field": f"{field}.topology", "dut_id": dut_id, "expected": normalized_topology, "received": record_topology},
+                next_action="Correct the DUT topology or onboard it as a separate corpus.",
+            )
         ids.add(dut_id)
         normalized.append(
             {
                 "dut_id": dut_id.strip(),
                 "cell_name": cell_name.strip(),
-                "parameters": {name: float(parameters[name]) for name in schema},
+                "parameters": {
+                    name: (
+                        int(parameters[name])
+                        if schema[name]["kind"] == "integer"
+                        else float(parameters[name])
+                    )
+                    for name in schema
+                },
                 "terminals": immutable_json_copy(terminals),
-                "topology": str(record.get("topology", "unspecified")),
+                "topology": normalized_topology,
             }
         )
     if not isinstance(layer_roles, Mapping) or not layer_roles:
@@ -155,6 +217,21 @@ def _validate_inputs(
                 next_action="Provide the exact semantic layermap entry.",
             )
         roles[str(role)] = {"layer": layer["layer"], "datatype": layer["datatype"]}
+    for record in normalized:
+        unknown_terminal_roles = sorted(
+            {
+                definition["layer_role"]
+                for definition in record["terminals"].values()
+                if definition["layer_role"] not in roles
+            }
+        )
+        if unknown_terminal_roles:
+            _fail(
+                "DUT_TERMINAL_LAYER_ROLE_UNKNOWN",
+                "A terminal refers to a layer_role that is not declared by the corpus.",
+                details={"field": "terminals.layer_role", "dut_id": record["dut_id"], "unknown": unknown_terminal_roles, "available": sorted(roles)},
+                next_action="Add the semantic layer role or correct the terminal mapping.",
+            )
     holdout = set(validation_dut_ids)
     unknown = sorted(holdout.difference(ids))
     if not holdout or unknown or holdout == ids:
@@ -211,6 +288,7 @@ def onboard_dut_corpus(
     """Create a labeled corpus artifact and explicit ambiguity questions."""
 
     schema, records, roles = _validate_inputs(
+        topology=topology,
         parameter_schema=parameter_schema,
         dut_records=dut_records,
         layer_roles=layer_roles,
@@ -417,6 +495,99 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             details={"field": "package_path", "error_type": type(exc).__name__},
             next_action="Restore the exact content-addressed corpus package.",
         )
+    if not isinstance(corpus, dict) or corpus.get("schema_version") != 1 or corpus.get("artifact_type") != "DutCorpusArtifact":
+        _fail(
+            "DUT_CORPUS_PACKAGE_SCHEMA_INVALID",
+            "Corpus metadata does not match the supported DutCorpusArtifact schema.",
+            details={"field": "corpus.json", "schema_version": corpus.get("schema_version") if isinstance(corpus, dict) else None, "artifact_type": corpus.get("artifact_type") if isinstance(corpus, dict) else None},
+            next_action="Restore a schema_version 1 DutCorpusArtifact package.",
+        )
+    required_mappings = (
+        "technology_identity",
+        "parameter_schema",
+        "layer_roles",
+        "partition",
+        "drawing_style_profile",
+    )
+    missing_mappings = [name for name in required_mappings if not isinstance(corpus.get(name), Mapping)]
+    invalid_scalars = [
+        name
+        for name in ("device_family", "topology")
+        if not isinstance(corpus.get(name), str) or not corpus.get(name, "").strip()
+    ]
+    if (
+        missing_mappings
+        or invalid_scalars
+        or not isinstance(corpus.get("dut_records"), list)
+        or not corpus.get("dut_records")
+        or not isinstance(corpus.get("unexplained_variations"), list)
+    ):
+        _fail(
+            "DUT_CORPUS_PACKAGE_SCHEMA_INVALID",
+            "Corpus metadata is missing required typed fields.",
+            details={"field": "corpus.json", "missing_or_invalid_mappings": missing_mappings, "invalid_scalars": invalid_scalars},
+            next_action="Restore the complete content-addressed corpus package.",
+        )
+    technology_identity = corpus["technology_identity"]
+    invalid_technology_fields = [
+        name
+        for name in ("technology", "pdk_revision")
+        if not isinstance(technology_identity.get(name), str)
+        or not technology_identity.get(name, "").strip()
+    ]
+    if invalid_technology_fields:
+        _fail(
+            "DUT_CORPUS_PACKAGE_SCHEMA_INVALID",
+            "Corpus technology identity is incomplete.",
+            details={"field": "technology_identity", "invalid_fields": invalid_technology_fields},
+            next_action="Restore exact technology and PDK revision identity.",
+        )
+    dut_ids: list[str] = []
+    for index, record in enumerate(corpus["dut_records"]):
+        if (
+            not isinstance(record, Mapping)
+            or not isinstance(record.get("dut_id"), str)
+            or not record.get("dut_id", "").strip()
+            or not isinstance(record.get("parameters"), Mapping)
+            or not isinstance(record.get("terminals"), Mapping)
+            or record.get("topology") != corpus["topology"]
+            or not SHA256_PATTERN.fullmatch(str(record.get("geometry_fingerprint_sha256", "")))
+            or not isinstance(record.get("flat_metrics"), Mapping)
+        ):
+            _fail(
+                "DUT_CORPUS_PACKAGE_SCHEMA_INVALID",
+                "A persisted DUT record is incomplete or inconsistent with the corpus.",
+                details={"field": f"dut_records[{index}]"},
+                next_action="Restore the exact generated corpus package.",
+            )
+        dut_ids.append(record["dut_id"])
+    if len(dut_ids) != len(set(dut_ids)):
+        _fail(
+            "DUT_CORPUS_PACKAGE_SCHEMA_INVALID",
+            "Persisted DUT IDs are duplicated.",
+            details={"field": "dut_records", "dut_ids": dut_ids},
+            next_action="Restore a corpus with one unique record per DUT.",
+        )
+    train_ids = corpus["partition"].get("train_dut_ids")
+    validation_ids = corpus["partition"].get(
+        "validation_dut_ids",
+        corpus["partition"].get("sealed_holdout_dut_ids"),
+    )
+    if (
+        not isinstance(train_ids, list)
+        or not isinstance(validation_ids, list)
+        or any(not isinstance(item, str) for item in train_ids + validation_ids)
+        or len(train_ids) != len(set(train_ids))
+        or len(validation_ids) != len(set(validation_ids))
+        or set(train_ids) & set(validation_ids)
+        or set(train_ids) | set(validation_ids) != set(dut_ids)
+    ):
+        _fail(
+            "DUT_CORPUS_PACKAGE_SCHEMA_INVALID",
+            "Corpus partition must cover every DUT exactly once.",
+            details={"field": "partition", "dut_ids": sorted(dut_ids), "train_dut_ids": train_ids, "validation_dut_ids": validation_ids},
+            next_action="Restore the exact corpus partition manifest.",
+        )
     source_sha256 = hashlib.sha256(sources[0].read_bytes()).hexdigest()
     if source_sha256 != corpus.get("source_layout_sha256"):
         _fail(
@@ -434,6 +605,176 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             next_action="Use the canonical corpus package path.",
         )
     return package, corpus, corpus_sha256
+
+
+def _load_json_package(
+    package_path: str | Path,
+    *,
+    document_name: str,
+    artifact_type: str,
+) -> tuple[Path, dict[str, Any], str]:
+    package = Path(package_path).expanduser().resolve()
+    document_path = package / document_name
+    try:
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _fail(
+            "CORPUS_EVIDENCE_PACKAGE_INVALID",
+            "A corpus evidence package is missing or unreadable.",
+            details={"field": "package_path", "value": str(package), "document_name": document_name, "error_type": type(exc).__name__},
+            next_action="Restore the exact content-addressed evidence package.",
+        )
+    if not isinstance(document, dict) or document.get("schema_version") != 1 or document.get("artifact_type") != artifact_type:
+        _fail(
+            "CORPUS_EVIDENCE_SCHEMA_INVALID",
+            "Corpus evidence metadata has the wrong schema or artifact type.",
+            details={"path": str(document_path), "expected_artifact_type": artifact_type, "schema_version": document.get("schema_version") if isinstance(document, dict) else None, "artifact_type": document.get("artifact_type") if isinstance(document, dict) else None},
+            next_action="Regenerate the evidence using the supported workflow.",
+        )
+    digest = canonical_sha256(document)
+    if not SHA256_PATTERN.fullmatch(package.name) or package.name != digest:
+        _fail(
+            "CORPUS_EVIDENCE_PACKAGE_ADDRESS_MISMATCH",
+            "Evidence content no longer matches its content-addressed directory.",
+            details={"path": str(package), "expected": digest, "received": package.name},
+            next_action="Quarantine the modified package and restore the exact original evidence.",
+        )
+    return package, document, digest
+
+
+def _validate_resolution_evidence(
+    *, corpus: Mapping[str, Any], corpus_sha256: str, resolution: Mapping[str, Any]
+) -> None:
+    if (
+        resolution.get("corpus_sha256") != corpus_sha256
+        or resolution.get("unresolved_blocker_count") != 0
+        or not isinstance(resolution.get("resolved_by"), str)
+        or not resolution.get("resolved_by", "").strip()
+        or not isinstance(resolution.get("resolved_at"), str)
+        or not resolution.get("resolved_at", "").strip()
+    ):
+        _fail(
+            "ADAPTER_CANDIDATE_RESOLUTION_INVALID",
+            "Resolution evidence must bind to this corpus with zero unresolved blockers.",
+            details={"expected_corpus_sha256": corpus_sha256, "received_corpus_sha256": resolution.get("corpus_sha256"), "unresolved_blocker_count": resolution.get("unresolved_blocker_count")},
+            next_action="Resolve every ambiguity and regenerate the content-addressed resolution package.",
+        )
+    expected = {
+        item["ambiguity_id"]: item
+        for item in corpus.get("unexplained_variations", [])
+        if isinstance(item, Mapping) and isinstance(item.get("ambiguity_id"), str)
+    }
+    decisions = resolution.get("decisions")
+    if not isinstance(decisions, list) or len(decisions) != len(expected):
+        _fail(
+            "ADAPTER_CANDIDATE_RESOLUTION_INVALID",
+            "Resolution decisions do not cover every corpus ambiguity exactly.",
+            details={"expected_ambiguity_ids": sorted(expected), "decision_count": len(decisions) if isinstance(decisions, list) else None},
+            next_action="Regenerate the resolution from the exact corpus package.",
+        )
+    seen: set[str] = set()
+    for decision in decisions:
+        if not isinstance(decision, Mapping):
+            _fail(
+                "ADAPTER_CANDIDATE_RESOLUTION_INVALID",
+                "A resolution decision is not an object.",
+                details={"received_type": type(decision).__name__},
+                next_action="Regenerate the resolution package.",
+            )
+        ambiguity_id = decision.get("ambiguity_id")
+        source = expected.get(ambiguity_id)
+        selected = decision.get("selected_reference_dut_id")
+        if source is None or ambiguity_id in seen or selected not in source.get("dut_ids", []):
+            _fail(
+                "ADAPTER_CANDIDATE_RESOLUTION_INVALID",
+                "A resolution decision is unknown, duplicated, or selects an invalid DUT.",
+                details={"ambiguity_id": ambiguity_id, "selected_reference_dut_id": selected},
+                next_action="Select one offered DUT for every exact ambiguity ID.",
+            )
+        if decision.get("candidate_dut_ids") != source.get("dut_ids"):
+            _fail(
+                "ADAPTER_CANDIDATE_RESOLUTION_INVALID",
+                "Resolution candidate DUTs drifted from the source corpus.",
+                details={"ambiguity_id": ambiguity_id, "expected": source.get("dut_ids"), "received": decision.get("candidate_dut_ids")},
+                next_action="Regenerate the resolution from the exact corpus package.",
+            )
+        seen.add(ambiguity_id)
+
+
+def _validate_scorecard_evidence(
+    *,
+    corpus: Mapping[str, Any],
+    corpus_sha256: str,
+    scorecard: Mapping[str, Any],
+    compiler_code_sha256: str,
+) -> None:
+    partition_sha256 = canonical_sha256(corpus["partition"])
+    policy = scorecard.get("scoring_policy")
+    compiler_identity = scorecard.get("compiler_identity")
+    if (
+        scorecard.get("corpus_sha256") != corpus_sha256
+        or scorecard.get("partition_sha256") != partition_sha256
+        or not isinstance(policy, Mapping)
+        or scorecard.get("scoring_policy_sha256") != canonical_sha256(policy)
+        or not isinstance(compiler_identity, Mapping)
+        or scorecard.get("compiler_identity_sha256") != canonical_sha256(compiler_identity)
+        or compiler_identity.get("compiler_code_sha256") != compiler_code_sha256
+    ):
+        _fail(
+            "ADAPTER_CANDIDATE_SCORECARD_BINDING_INVALID",
+            "Scorecard hashes or compiler identity do not bind to this exact candidate.",
+            details={"expected_corpus_sha256": corpus_sha256, "expected_partition_sha256": partition_sha256, "compiler_code_sha256": compiler_code_sha256},
+            next_action="Rescore the exact compiler output and use its untouched package.",
+        )
+    if (
+        scorecard.get("reference_source_replayed") is not False
+        or scorecard.get("evidence_class") != "distinct_stream_logical_validation_no_execution_receipt"
+        or scorecard.get("compiler_execution_receipt_verified") is not False
+        or scorecard.get("all_required_cohorts_passed") is not True
+    ):
+        _fail(
+            "ADAPTER_CANDIDATE_SCORECARD_GATE_FAILED",
+            "Scorecard is replayed, misclassified, or did not pass every required cohort.",
+            details={"reference_source_replayed": scorecard.get("reference_source_replayed"), "evidence_class": scorecard.get("evidence_class"), "all_required_cohorts_passed": scorecard.get("all_required_cohorts_passed")},
+            next_action="Run the scorer on a distinct compiler output stream and preserve the resulting package.",
+        )
+    expected_validation = set(corpus["partition"].get("validation_dut_ids", []))
+    expected_ids = {record["dut_id"] for record in corpus["dut_records"]}
+    per_dut = scorecard.get("per_dut")
+    if not isinstance(per_dut, list) or len(per_dut) != len(expected_ids):
+        _fail(
+            "ADAPTER_CANDIDATE_SCORECARD_STRUCTURE_INVALID",
+            "Scorecard must contain one result for every corpus DUT.",
+            details={"expected_dut_ids": sorted(expected_ids), "received_count": len(per_dut) if isinstance(per_dut, list) else None},
+            next_action="Regenerate the scorecard from the exact corpus.",
+        )
+    seen: set[str] = set()
+    for item in per_dut:
+        dut_id = item.get("dut_id") if isinstance(item, Mapping) else None
+        expected_cohort = "logical_validation" if dut_id in expected_validation else "train_reference"
+        if (
+            dut_id not in expected_ids
+            or dut_id in seen
+            or item.get("cohort") != expected_cohort
+            or item.get("passed") is not True
+            or not SHA256_PATTERN.fullmatch(str(item.get("reference_geometry_fingerprint_sha256", "")))
+            or not SHA256_PATTERN.fullmatch(str(item.get("candidate_geometry_fingerprint_sha256", "")))
+        ):
+            _fail(
+                "ADAPTER_CANDIDATE_SCORECARD_STRUCTURE_INVALID",
+                "A per-DUT score result is missing, duplicated, failed, or bound to the wrong cohort.",
+                details={"dut_id": dut_id, "expected_cohort": expected_cohort},
+                next_action="Regenerate the scorecard using the exact corpus and compiler output.",
+            )
+        seen.add(dut_id)
+    cohorts = scorecard.get("cohorts")
+    if not isinstance(cohorts, Mapping) or set(cohorts) != {"train_reference", "logical_validation"} or any(not isinstance(value, Mapping) or value.get("passed") is not True for value in cohorts.values()):
+        _fail(
+            "ADAPTER_CANDIDATE_SCORECARD_STRUCTURE_INVALID",
+            "Both required scorecard cohorts must exist and pass.",
+            details={"cohorts": cohorts},
+            next_action="Regenerate the scorecard and correct every failed cohort.",
+        )
 
 
 def _publish_json_package(*, root: Path, kind: str, document_name: str, document: Mapping[str, Any]) -> tuple[str, Path]:
@@ -543,6 +884,21 @@ def score_reproduced_corpus(
     """Score a reproduced layout against training and logical-validation DUTs."""
 
     _, corpus, corpus_sha256 = _load_corpus_package(corpus_package_path)
+    if (
+        not isinstance(compiler_identity, Mapping)
+        or not isinstance(compiler_identity.get("compiler_id"), str)
+        or not compiler_identity.get("compiler_id", "").strip()
+        or not isinstance(compiler_identity.get("compiler_version"), str)
+        or not compiler_identity.get("compiler_version", "").strip()
+        or not isinstance(compiler_identity.get("compiler_code_sha256"), str)
+        or not SHA256_PATTERN.fullmatch(compiler_identity.get("compiler_code_sha256", ""))
+    ):
+        _fail(
+            "CORPUS_SCORING_COMPILER_IDENTITY_INVALID",
+            "Scoring requires compiler_id, compiler_version, and an exact lowercase code SHA-256.",
+            details={"field": "compiler_identity", "received": dict(compiler_identity) if isinstance(compiler_identity, Mapping) else compiler_identity},
+            next_action="Identify the exact compiler implementation before scoring its output.",
+        )
     required_policy = {"absolute_tolerance", "relative_tolerance", "minimum_aggregate_score", "exact_fingerprint_required"}
     missing_policy = sorted(required_policy.difference(scoring_policy))
     if missing_policy:
@@ -656,13 +1012,15 @@ def score_reproduced_corpus(
         "scoring_policy": immutable_json_copy(scoring_policy),
         "scoring_policy_sha256": canonical_sha256(scoring_policy),
         "compiler_identity": immutable_json_copy(compiler_identity),
+        "compiler_identity_sha256": canonical_sha256(compiler_identity),
         "reproduced_layout_sha256": snapshot.sha256,
         "reference_source_replayed": reference_source_replayed,
         "evidence_class": (
             "reference_replay_not_reproduction"
             if reference_source_replayed
-            else "independent_stream_logical_validation"
+            else "distinct_stream_logical_validation_no_execution_receipt"
         ),
+        "compiler_execution_receipt_verified": False,
         "holdout_isolation_level": corpus["partition"].get(
             "isolation_level", "legacy_unspecified"
         ),
@@ -698,23 +1056,21 @@ def build_technology_adapter_candidate(
     """Package a scored candidate without claiming foundry qualification."""
 
     _, corpus, corpus_sha256 = _load_corpus_package(corpus_package_path)
-    try:
-        resolution = json.loads(Path(resolution_package_path).joinpath("resolution.json").read_text(encoding="utf-8"))
-        scorecard = json.loads(Path(scorecard_package_path).joinpath("scorecard.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        _fail(
-            "ADAPTER_CANDIDATE_EVIDENCE_MISSING",
-            "Resolution or scorecard package is unreadable.",
-            details={"error_type": type(exc).__name__},
-            next_action="Provide the exact content-addressed resolution and scorecard packages.",
-        )
-    if resolution.get("corpus_sha256") != corpus_sha256 or scorecard.get("corpus_sha256") != corpus_sha256:
-        _fail(
-            "ADAPTER_CANDIDATE_EVIDENCE_MISMATCH",
-            "Resolution and scorecard must bind to the same exact corpus.",
-            details={"expected": corpus_sha256, "resolution": resolution.get("corpus_sha256"), "scorecard": scorecard.get("corpus_sha256")},
-            next_action="Regenerate evidence from the exact immutable corpus package.",
-        )
+    _, resolution, _ = _load_json_package(
+        resolution_package_path,
+        document_name="resolution.json",
+        artifact_type="CorpusResolutionManifest",
+    )
+    _, scorecard, _ = _load_json_package(
+        scorecard_package_path,
+        document_name="scorecard.json",
+        artifact_type="AdapterConformanceScorecard",
+    )
+    _validate_resolution_evidence(
+        corpus=corpus,
+        corpus_sha256=corpus_sha256,
+        resolution=resolution,
+    )
     if not scorecard.get("all_required_cohorts_passed"):
         if scorecard.get("reference_source_replayed"):
             _fail(
@@ -735,12 +1091,48 @@ def build_technology_adapter_candidate(
             details={"field": "scorecard.cohorts", "received": scorecard.get("cohorts")},
             next_action="Correct the compiler, reproduce the corpus again, and create a new scorecard.",
         )
-    if not isinstance(compiler_code_sha256, str) or len(compiler_code_sha256) != 64:
+    if not isinstance(compiler_code_sha256, str) or not SHA256_PATTERN.fullmatch(compiler_code_sha256):
         _fail(
             "ADAPTER_COMPILER_HASH_INVALID",
             "compiler_code_sha256 must pin the exact candidate implementation.",
             details={"field": "compiler_code_sha256", "value": compiler_code_sha256},
             next_action="Provide the lowercase SHA-256 of the reviewed compiler code artifact.",
+        )
+    _validate_scorecard_evidence(
+        corpus=corpus,
+        corpus_sha256=corpus_sha256,
+        scorecard=scorecard,
+        compiler_code_sha256=compiler_code_sha256,
+    )
+    if not isinstance(adapter_identity, Mapping) or set(adapter_identity) != ADAPTER_IDENTITY_FIELDS:
+        _fail(
+            "ADAPTER_CANDIDATE_IDENTITY_INVALID",
+            "Adapter identity must contain the exact registered identity fields.",
+            details={"field": "adapter_identity", "missing": sorted(ADAPTER_IDENTITY_FIELDS.difference(adapter_identity)) if isinstance(adapter_identity, Mapping) else sorted(ADAPTER_IDENTITY_FIELDS), "unexpected": sorted(set(adapter_identity).difference(ADAPTER_IDENTITY_FIELDS)) if isinstance(adapter_identity, Mapping) else []},
+            next_action="Provide the exact technology, PDK, kind, family, topology, and package version.",
+        )
+    expected_identity = {
+        "technology": corpus["technology_identity"].get("technology"),
+        "pdk_revision": corpus["technology_identity"].get("pdk_revision"),
+        "adapter_kind": "transistor",
+        "device_family": corpus["device_family"],
+        "topology": corpus["topology"],
+    }
+    mismatches = {
+        field: {"expected": expected, "received": adapter_identity.get(field)}
+        for field, expected in expected_identity.items()
+        if not isinstance(adapter_identity.get(field), str)
+        or not adapter_identity.get(field, "").strip()
+        or adapter_identity.get(field) != expected
+    }
+    if not isinstance(adapter_identity.get("package_version"), str) or not adapter_identity.get("package_version", "").strip():
+        mismatches["package_version"] = {"expected": "non-empty exact version", "received": adapter_identity.get("package_version")}
+    if mismatches:
+        _fail(
+            "ADAPTER_CANDIDATE_IDENTITY_MISMATCH",
+            "Adapter identity does not match the exact corpus technology and topology.",
+            details={"field": "adapter_identity", "mismatches": mismatches},
+            next_action="Use an identity that exactly matches the corpus or onboard a separate corpus.",
         )
     package = {
         "schema_version": 1,

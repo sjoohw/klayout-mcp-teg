@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import shutil
 import tempfile
 from typing import Any, Mapping
@@ -18,6 +19,9 @@ from .file_publication import (
 )
 from .klayout_adapter import create_layout_snapshot, run_klayout_worker
 from .workflow_manifest import canonical_json_bytes, canonical_sha256
+
+
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _fail(code: str, message: str, *, details: Mapping[str, Any], next_action: str) -> None:
@@ -255,6 +259,45 @@ def compose_pad_macro_overlay(
             "Pad macro artifact.json is unreadable.",
             details={"field": "package_path", "value": str(package), "error_type": type(exc).__name__},
             next_action="Restore the exact content-addressed pad macro package.",
+        )
+    if (
+        not isinstance(artifact, dict)
+        or artifact.get("schema_version") != 1
+        or artifact.get("artifact_type") != "PadMacroArtifact"
+    ):
+        _fail(
+            "PAD_MACRO_PACKAGE_SCHEMA_INVALID",
+            "Pad macro metadata has the wrong schema or artifact type.",
+            details={"field": "artifact.json", "schema_version": artifact.get("schema_version") if isinstance(artifact, dict) else None, "artifact_type": artifact.get("artifact_type") if isinstance(artifact, dict) else None},
+            next_action="Restore a schema_version 1 PadMacroArtifact package.",
+        )
+    if (
+        not SHA256_PATTERN.fullmatch(str(artifact.get("source_file_sha256", "")))
+        or not SHA256_PATTERN.fullmatch(
+            str(artifact.get("recursive_source_cell_fingerprint_sha256", ""))
+        )
+        or not isinstance(artifact.get("source_cell"), str)
+        or not artifact.get("source_cell", "").strip()
+        or not isinstance(artifact.get("instances"), list)
+        or not artifact.get("instances")
+        or not isinstance(artifact.get("eligible_edge_landings"), list)
+        or not artifact.get("eligible_edge_landings")
+        or artifact.get("pad_geometry_generation_allowed") is not False
+        or artifact.get("source_hierarchy_must_be_preserved") is not True
+    ):
+        _fail(
+            "PAD_MACRO_PACKAGE_SCHEMA_INVALID",
+            "Pad macro metadata is missing required identity, landing, or immutability fields.",
+            details={"field": "artifact.json"},
+            next_action="Restore the exact generated PadMacroArtifact package.",
+        )
+    artifact_sha256 = canonical_sha256(artifact)
+    if package.name != artifact_sha256:
+        _fail(
+            "PAD_MACRO_PACKAGE_ADDRESS_MISMATCH",
+            "Pad macro metadata no longer matches its content-addressed directory.",
+            details={"path": str(package), "expected": artifact_sha256, "received": package.name},
+            next_action="Quarantine the modified package and restore the exact original artifact.",
         )
     digest = hashlib.sha256(sources[0].read_bytes()).hexdigest()
     if digest != artifact.get("source_file_sha256"):

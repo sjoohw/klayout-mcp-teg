@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 import json
 from pathlib import Path
 import re
@@ -137,6 +138,97 @@ class TechnologyAdapterRegistry:
             )
         return document
 
+    @staticmethod
+    def _validate_recorded_at(value: Any, *, path: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_FIELD_REQUIRED",
+                "A lifecycle record is missing recorded_at.",
+                details={"path": path, "field": "recorded_at"},
+                next_action="Provide a timezone-aware ISO-8601 lifecycle timestamp.",
+            )
+        normalized = value.strip()
+        try:
+            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is None or parsed.tzinfo is None:
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_TIMESTAMP_INVALID",
+                "recorded_at must be a timezone-aware ISO-8601 timestamp.",
+                details={"path": path, "field": "recorded_at", "value": value},
+                next_action="Use an explicit UTC offset, for example 2026-09-02T10:00:00Z.",
+            )
+        return normalized
+
+    @staticmethod
+    def _order_lifecycle_chain(
+        records: list[tuple[str, dict[str, Any]]], *, package_sha256: str
+    ) -> list[dict[str, Any]]:
+        legacy = [(digest, record) for digest, record in records if record.get("schema_version") == 1]
+        chained = [(digest, record) for digest, record in records if record.get("schema_version") == 2]
+        unsupported = [record.get("schema_version") for _, record in records if record.get("schema_version") not in {1, 2}]
+        if unsupported:
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_SCHEMA_UNSUPPORTED",
+                "A persisted lifecycle record has an unsupported schema version.",
+                details={"package_sha256": package_sha256, "schema_versions": unsupported},
+                next_action="Restore schema_version 1 or 2 lifecycle evidence.",
+            )
+        if len(legacy) > 1:
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_ORDER_UNPROVABLE",
+                "Multiple legacy lifecycle records have no durable append order.",
+                details={"package_sha256": package_sha256, "record_sha256s": sorted(digest for digest, _ in legacy)},
+                next_action="Migrate the legacy records into one reviewed sequence/hash chain before restart.",
+            )
+        by_sequence: dict[int, tuple[str, dict[str, Any]]] = {}
+        for digest, record in chained:
+            sequence = record.get("sequence")
+            if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1 or sequence in by_sequence:
+                _fail(
+                    "TECH_ADAPTER_LIFECYCLE_SEQUENCE_INVALID",
+                    "Lifecycle sequence must be a unique positive integer per package.",
+                    details={"package_sha256": package_sha256, "sequence": sequence, "record_sha256": digest},
+                    next_action="Restore the exact monotonic lifecycle chain.",
+                )
+            by_sequence[sequence] = (digest, record)
+
+        ordered_pairs = list(legacy)
+        expected_sequence = 2 if legacy else 1
+        previous_digest = legacy[0][0] if legacy else None
+        while by_sequence:
+            entry = by_sequence.pop(expected_sequence, None)
+            if entry is None:
+                _fail(
+                    "TECH_ADAPTER_LIFECYCLE_CHAIN_BROKEN",
+                    "Lifecycle sequence contains a gap or does not start at the expected record.",
+                    details={"package_sha256": package_sha256, "expected_sequence": expected_sequence, "remaining_sequences": sorted(by_sequence)},
+                    next_action="Restore every record in the exact append chain.",
+                )
+            digest, record = entry
+            if record.get("prev_record_sha256") != previous_digest:
+                _fail(
+                    "TECH_ADAPTER_LIFECYCLE_CHAIN_BROKEN",
+                    "Lifecycle prev_record_sha256 does not match the preceding record.",
+                    details={"package_sha256": package_sha256, "sequence": expected_sequence, "expected": previous_digest, "received": record.get("prev_record_sha256")},
+                    next_action="Restore the exact append-only lifecycle chain.",
+                )
+            ordered_pairs.append((digest, record))
+            previous_digest = digest
+            expected_sequence += 1
+
+        ordered = [record for _, record in ordered_pairs]
+        revoked_indexes = [index for index, record in enumerate(ordered) if record.get("action") == "revoked"]
+        if revoked_indexes and revoked_indexes != [len(ordered) - 1]:
+            _fail(
+                "TECH_ADAPTER_REVOKED_TERMINAL_STATE_VIOLATION",
+                "A revoked lifecycle package has later records, which is forbidden.",
+                details={"package_sha256": package_sha256, "revoked_sequence": revoked_indexes[0] + 1},
+                next_action="Quarantine the invalid post-revocation lifecycle records.",
+            )
+        return ordered
+
     def _load_from_disk(self) -> None:
         assert self.root is not None
         for path in sorted((self.root / "packages").glob("*.json")):
@@ -163,7 +255,7 @@ class TechnologyAdapterRegistry:
                 )
             self._packages[key] = (path.stem, document)
 
-        lifecycle_records: list[tuple[str, str, dict[str, Any]]] = []
+        lifecycle_records: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         registered_hashes = {entry[0] for entry in self._packages.values()}
         for path in sorted((self.root / "lifecycle").glob("*.json")):
             record = self._read_persisted_document(path)
@@ -182,16 +274,16 @@ class TechnologyAdapterRegistry:
                     details={"path": str(path), "action": record.get("action")},
                     next_action="Restore a qualified, deprecated, or revoked lifecycle record.",
                 )
-            recorded_at = record.get("recorded_at")
-            if not isinstance(recorded_at, str) or not recorded_at.strip():
-                _fail(
-                    "TECH_ADAPTER_LIFECYCLE_FIELD_REQUIRED",
-                    "A persisted lifecycle record is missing recorded_at.",
-                    details={"path": str(path), "field": "recorded_at"},
-                    next_action="Restore the complete signed lifecycle record.",
+            self._validate_recorded_at(record.get("recorded_at"), path=str(path))
+            lifecycle_records.setdefault(package_sha256, []).append((path.stem, record))
+        self._lifecycle = []
+        for package_sha256 in sorted(lifecycle_records):
+            self._lifecycle.extend(
+                self._order_lifecycle_chain(
+                    lifecycle_records[package_sha256],
+                    package_sha256=package_sha256,
                 )
-            lifecycle_records.append((recorded_at, path.stem, record))
-        self._lifecycle = [record for _, _, record in sorted(lifecycle_records)]
+            )
 
     @staticmethod
     def _publish_document(directory: Path, digest: str, document: Mapping[str, Any]) -> None:
@@ -283,6 +375,16 @@ class TechnologyAdapterRegistry:
                 details={"field": "action", "value": action, "allowed": sorted(LIFECYCLE_ACTIONS)},
                 next_action="Choose one supported lifecycle action.",
             )
+        package_lifecycle = [
+            record for record in self._lifecycle if record["package_sha256"] == package_sha256
+        ]
+        if package_lifecycle and package_lifecycle[-1]["action"] == "revoked":
+            _fail(
+                "TECH_ADAPTER_REVOKED_TERMINAL_STATE",
+                "Revocation is terminal for an exact adapter package.",
+                details={"field": "action", "package_sha256": package_sha256, "value": action},
+                next_action="Register a new explicitly versioned package instead of reviving a revoked package.",
+            )
         for field_name, value in (
             ("reason", reason),
             ("recorded_at", recorded_at),
@@ -295,6 +397,9 @@ class TechnologyAdapterRegistry:
                     details={"field": field_name, "value": value},
                     next_action=f"Provide the trusted {field_name} value.",
                 )
+        normalized_recorded_at = self._validate_recorded_at(
+            recorded_at, path="append_lifecycle_record"
+        )
         hashes = {"package_sha256": package_sha256, "signature_sha256": signature_sha256}
         if qualification_receipt_sha256 is not None:
             hashes["qualification_receipt_sha256"] = qualification_receipt_sha256
@@ -310,12 +415,17 @@ class TechnologyAdapterRegistry:
                 details={"field": invalid_hashes[0], "invalid_fields": invalid_hashes},
                 next_action="Provide the exact signed evidence hashes.",
             )
+        previous_digest = (
+            canonical_sha256(package_lifecycle[-1]) if package_lifecycle else None
+        )
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "package_sha256": package_sha256,
+            "sequence": len(package_lifecycle) + 1,
+            "prev_record_sha256": previous_digest,
             "action": action,
             "reason": reason.strip(),
-            "recorded_at": recorded_at.strip(),
+            "recorded_at": normalized_recorded_at,
             "signer_reference": signer_reference.strip(),
             "signature_sha256": signature_sha256,
             "qualification_receipt_sha256": qualification_receipt_sha256,
@@ -325,6 +435,12 @@ class TechnologyAdapterRegistry:
             self._publish_document(self.root / "lifecycle", record_sha256, record)
         if not any(canonical_sha256(existing) == record_sha256 for existing in self._lifecycle):
             self._lifecycle.append(record)
+            self._lifecycle.sort(
+                key=lambda item: (
+                    item["package_sha256"],
+                    int(item.get("sequence", 1)),
+                )
+            )
         return {"ok": True, "record_sha256": record_sha256, "record": immutable_json_copy(record)}
 
     def resolve(

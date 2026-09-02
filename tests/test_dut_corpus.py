@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import subprocess
 
@@ -12,6 +13,7 @@ from klayout_mcp.dut_corpus import (
 from klayout_mcp.errors import AnalysisError
 from klayout_mcp.klayout_adapter import find_klayout_executable
 from klayout_mcp.technology_registry import TechnologyAdapterRegistry
+from klayout_mcp.workflow_manifest import canonical_json_bytes, canonical_sha256
 
 
 def _records():
@@ -79,6 +81,13 @@ def _create_reproduced(tmp_path: Path, executable: str) -> Path:
     return reproduced
 
 
+def _write_json_package(root: Path, document_name: str, document: dict) -> Path:
+    package = root / canonical_sha256(document)
+    package.mkdir(parents=True)
+    (package / document_name).write_bytes(canonical_json_bytes(document))
+    return package
+
+
 def test_labeled_corpus_round_trip_scoring_and_candidate_package(tmp_path: Path) -> None:
     source, executable = _create_source(tmp_path)
     corpus = onboard_dut_corpus(
@@ -115,7 +124,7 @@ def test_labeled_corpus_round_trip_scoring_and_candidate_package(tmp_path: Path)
             "exact_fingerprint_required": True,
         },
         scorecard_root=tmp_path / "scores",
-        compiler_identity={"compiler_id": "reference-replay", "compiler_version": "1"},
+        compiler_identity={"compiler_id": "reference-replay", "compiler_version": "1", "compiler_code_sha256": "f" * 64},
         klayout_executable=executable,
     )
     assert replay_score["scorecard"]["reference_source_replayed"] is True
@@ -143,10 +152,12 @@ def test_labeled_corpus_round_trip_scoring_and_candidate_package(tmp_path: Path)
             "exact_fingerprint_required": True,
         },
         scorecard_root=tmp_path / "scores",
-        compiler_identity={"compiler_id": "fixture-regenerator", "compiler_version": "1"},
+        compiler_identity={"compiler_id": "fixture-regenerator", "compiler_version": "1", "compiler_code_sha256": "f" * 64},
         klayout_executable=executable,
     )
     assert score["scorecard"]["reference_source_replayed"] is False
+    assert score["scorecard"]["evidence_class"] == "distinct_stream_logical_validation_no_execution_receipt"
+    assert score["scorecard"]["compiler_execution_receipt_verified"] is False
     assert score["scorecard"]["cohorts"]["logical_validation"]["passed"] is True
     candidate = build_technology_adapter_candidate(
         corpus_package_path=corpus["package_path"],
@@ -160,6 +171,71 @@ def test_labeled_corpus_round_trip_scoring_and_candidate_package(tmp_path: Path)
     registry = TechnologyAdapterRegistry()
     registered = registry.register_package(candidate["package"])
     assert registry.resolve(_identity(), expected_package_sha256=registered["package_sha256"])["fallback_used"] is False
+
+    with pytest.raises(AnalysisError) as invalid_hash:
+        build_technology_adapter_candidate(
+            corpus_package_path=corpus["package_path"],
+            resolution_package_path=resolution["package_path"],
+            scorecard_package_path=score["package_path"],
+            adapter_identity=_identity(),
+            compiler_code_sha256="z" * 64,
+            adapter_root=tmp_path / "invalid-hash-adapters",
+        )
+    assert invalid_hash.value.code == "ADAPTER_COMPILER_HASH_INVALID"
+
+    with pytest.raises(AnalysisError) as compiler_mismatch:
+        build_technology_adapter_candidate(
+            corpus_package_path=corpus["package_path"],
+            resolution_package_path=resolution["package_path"],
+            scorecard_package_path=score["package_path"],
+            adapter_identity=_identity(),
+            compiler_code_sha256="e" * 64,
+            adapter_root=tmp_path / "compiler-mismatch-adapters",
+        )
+    assert compiler_mismatch.value.code == "ADAPTER_CANDIDATE_SCORECARD_BINDING_INVALID"
+
+    with pytest.raises(AnalysisError) as identity_mismatch:
+        build_technology_adapter_candidate(
+            corpus_package_path=corpus["package_path"],
+            resolution_package_path=resolution["package_path"],
+            scorecard_package_path=score["package_path"],
+            adapter_identity={**_identity(), "topology": "pmos-core"},
+            compiler_code_sha256="f" * 64,
+            adapter_root=tmp_path / "identity-mismatch-adapters",
+        )
+    assert identity_mismatch.value.code == "ADAPTER_CANDIDATE_IDENTITY_MISMATCH"
+
+    forged_resolution = dict(resolution["resolution"])
+    forged_resolution["unresolved_blocker_count"] = 999
+    forged_resolution_path = _write_json_package(
+        tmp_path / "forged-resolutions", "resolution.json", forged_resolution
+    )
+    with pytest.raises(AnalysisError) as unresolved:
+        build_technology_adapter_candidate(
+            corpus_package_path=corpus["package_path"],
+            resolution_package_path=forged_resolution_path,
+            scorecard_package_path=score["package_path"],
+            adapter_identity=_identity(),
+            compiler_code_sha256="f" * 64,
+            adapter_root=tmp_path / "unresolved-adapters",
+        )
+    assert unresolved.value.code == "ADAPTER_CANDIDATE_RESOLUTION_INVALID"
+
+    forged_scorecard = dict(score["scorecard"])
+    forged_scorecard["per_dut"] = []
+    forged_scorecard_path = _write_json_package(
+        tmp_path / "forged-scores", "scorecard.json", forged_scorecard
+    )
+    with pytest.raises(AnalysisError) as arbitrary_pass:
+        build_technology_adapter_candidate(
+            corpus_package_path=corpus["package_path"],
+            resolution_package_path=resolution["package_path"],
+            scorecard_package_path=forged_scorecard_path,
+            adapter_identity=_identity(),
+            compiler_code_sha256="f" * 64,
+            adapter_root=tmp_path / "forged-score-adapters",
+        )
+    assert arbitrary_pass.value.code == "ADAPTER_CANDIDATE_SCORECARD_STRUCTURE_INVALID"
 
 
 def test_same_parameters_different_geometry_requires_reference_choice(tmp_path: Path) -> None:
@@ -191,7 +267,7 @@ def test_same_parameters_different_geometry_requires_reference_choice(tmp_path: 
         topology="nmos-core",
         parameter_schema={"gate_length_nm": {"unit": "nm", "kind": "continuous"}},
         dut_records=records,
-        layer_roles={"active": {"layer": 2, "datatype": 0}},
+        layer_roles={"active": {"layer": 2, "datatype": 0}, "gate": {"layer": 6, "datatype": 0}},
         validation_dut_ids=["D3"],
         package_root=tmp_path / "corpora",
         worker_runner=worker,
@@ -202,3 +278,48 @@ def test_same_parameters_different_geometry_requires_reference_choice(tmp_path: 
     question = result["clarification_request"]["questions"][0]
     assert question["question_id"].startswith("same-parameters-different-geometry")
     assert {option["value"] for option in question["options"]} == {"D1", "D2"}
+
+
+@pytest.mark.parametrize(
+    ("parameter_schema", "records", "topology", "expected_code"),
+    [
+        (
+            {"nfin": {"unit": "count", "kind": "integer"}},
+            [
+                {**record, "parameters": {"nfin": 2.5}}
+                for record in _records()
+            ],
+            "nmos-core",
+            "DUT_PARAMETER_ROW_INVALID",
+        ),
+        (
+            {"gate_length_nm": {"unit": "nm", "kind": "continuous"}},
+            [{**record, "terminals": {"G": {}}} for record in _records()],
+            "nmos-core",
+            "DUT_TERMINAL_MAPPING_INVALID",
+        ),
+        (
+            {"gate_length_nm": {"unit": "nm", "kind": "continuous"}},
+            [{**record, "topology": "pmos-core"} for record in _records()],
+            "nmos-core",
+            "DUT_TOPOLOGY_MISMATCH",
+        ),
+    ],
+)
+def test_corpus_declared_kinds_terminals_and_topology_fail_closed(
+    tmp_path: Path, parameter_schema, records, topology, expected_code
+) -> None:
+    with pytest.raises(AnalysisError) as caught:
+        onboard_dut_corpus(
+            source_layout_path=str(tmp_path / "unused.gds"),
+            technology_identity={"technology": "tech-a", "pdk_revision": "r7"},
+            device_family="finfet",
+            topology=topology,
+            parameter_schema=parameter_schema,
+            dut_records=records,
+            layer_roles={"active": {"layer": 2, "datatype": 0}, "gate": {"layer": 6, "datatype": 0}},
+            validation_dut_ids=["D3"],
+            package_root=tmp_path / "corpora",
+        )
+
+    assert caught.value.code == expected_code

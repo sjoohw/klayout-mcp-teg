@@ -33,6 +33,7 @@ from klayout_mcp.server import (
     plan_phase1_direct_teg_layout,
     plan_staged_mesh_segment,
     plan_teg_dut_sequence,
+    register_transistor_adapter_candidate,
     list_reference_layouts,
     server_status,
     teg_status,
@@ -92,6 +93,28 @@ def test_deployment_workflow_roots_drive_status_and_onboarding(
     assert selected_output == output_root
     assert onboarding["corpora"] == workflow_root / "onboarding" / "dut-corpora"
     assert onboarding["pad_outputs"] == output_root / "onboarding-pad-overlays"
+
+
+def test_candidate_registration_rehashes_requested_package(
+    tmp_path, monkeypatch
+) -> None:
+    workflow_root = tmp_path / "workflow"
+    output_root = tmp_path / "output"
+    monkeypatch.delenv("KLAYOUT_MCP_DEPLOYMENT_TOML", raising=False)
+    monkeypatch.setenv("KLAYOUT_MCP_WORKFLOW_ROOT", str(workflow_root))
+    monkeypatch.setenv("KLAYOUT_MCP_WORKFLOW_OUTPUT_ROOT", str(output_root))
+    requested = "a" * 64
+    package = workflow_root / "onboarding" / "adapter-candidates" / requested
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(
+        '{"schema_version":1,"artifact_type":"TechnologyAdapterPackage"}',
+        encoding="utf-8",
+    )
+
+    result = register_transistor_adapter_candidate(requested)
+
+    assert result["ok"] is False
+    assert result["code"] == "TECH_ADAPTER_CANDIDATE_PACKAGE_INVALID"
 
 
 def test_server_status() -> None:

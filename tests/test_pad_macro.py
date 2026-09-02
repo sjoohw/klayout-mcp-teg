@@ -57,6 +57,35 @@ def test_pad_macro_artifact_preserves_source_and_records_no_keepout(tmp_path: Pa
     assert json.loads((package / "artifact.json").read_text(encoding="utf-8")) == artifact
 
 
+def test_pad_macro_compose_rejects_tampered_artifact_metadata(tmp_path: Path) -> None:
+    source = tmp_path / "pad.gds"
+    source.write_bytes(b"immutable-pad-stream")
+    result = create_pad_macro_artifact(
+        source_layout_path=str(source),
+        top_cell="PAD_MACRO_40X40",
+        access_layer={"layer": 10, "datatype": 0},
+        instances=_instances(),
+        package_root=tmp_path / "registry",
+        expected_dbu_um=0.001,
+        worker_runner=_mock_worker,
+    )
+    package = Path(result["package_path"])
+    artifact_path = package / "artifact.json"
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["instances"][0]["x_um"] = 123.0
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    with pytest.raises(AnalysisError) as caught:
+        compose_pad_macro_overlay(
+            package_path=package,
+            output_path=str(tmp_path / "should-not-exist.gds"),
+            operations=[],
+            worker_runner=lambda request, **kwargs: {"ok": True},
+        )
+
+    assert caught.value.code == "PAD_MACRO_PACKAGE_ADDRESS_MISMATCH"
+
+
 def test_pad_macro_artifact_rejects_dbu_mismatch_before_publication(tmp_path: Path) -> None:
     source = tmp_path / "pad.gds"
     source.write_bytes(b"pad")

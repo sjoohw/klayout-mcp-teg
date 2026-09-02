@@ -273,6 +273,8 @@ Upgrade checkpoint 진행:
 - [x] `HostComponents`, allowlisted stable component ID 기반 TOML loader와 profile×stage `host_doctor`를 구현했다.
 - [x] Exact-key immutable `TechnologyAdapterRegistry`, content-addressed package/snapshot과 append-only
   qualification/deprecation/revocation record를 구현하고 intake/privileged reverify에 package/snapshot pin을 결속했다.
+- [x] Lifecycle record에 package별 monotonic `sequence`와 `prev_record_sha256`를 넣고 재시작 시 hash chain으로
+  복원한다. `recorded_at` 역전은 상태를 바꾸지 않으며 revoke 이후 동일 exact package의 상태 추가는 금지한다.
 - [x] `ActionableIssue`/`ValidationReport`와 immutable draft revision, stale-revision conflict,
   content-bound resume token, no-write `validate_only`를 구현했다.
 - [x] External report parser와 별개인 host-only DRC/LVS/PEX runner registry를 추가했다. Runner는
@@ -550,6 +552,12 @@ Upgrade checkpoint 진행:
 - [x] Reproduced GDS를 실제로 다시 읽어 train/validation을 분리 scoring한다. 원본 stream replay는
   evidence에서 제외하고, 별도 stream이 모두 통과한 경우에만
   `candidate_scored_logical_validation_not_foundry_qualified` package를 exact registry에 등록할 수 있다.
+- [x] Corpus/Pad/resolution/scorecard/candidate 소비 시 content address와 schema/type을 다시 검사한다.
+  Resolution blocker/decision, scorecard partition·compiler·per-DUT cohort, adapter technology/device/topology를
+  교차 검증하며 compiler hash는 lowercase SHA-256만 허용한다.
+- [x] 다른 file SHA는 independent reproduction이 아닌
+  `distinct_stream_logical_validation_no_execution_receipt`로 표시한다. Integer parameter, terminal
+  layer role과 per-DUT topology를 선언 schema에 맞게 fail-closed 검증한다.
 - [ ] Corpus로부터 CPP 연계 Poly/Active/contact/implant/terminal dependency recipe를 자동 합성하는
   process-specific compiler는 만들지 않았다. 실제 labeled corpus, topology 규칙과 foundry 검증 없이는
   한 GDS에서 이를 추론하지 않으며 candidate score를 PCell/electrical/foundry 동등성으로 승격하지 않는다.

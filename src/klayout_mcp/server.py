@@ -114,7 +114,7 @@ from .teg_planning import plan_teg_measurement_request
 from .technology_registry import TechnologyAdapterRegistry
 from .verification_runner import external_verification_runner_contract
 from .transistor_context import plan_single_transistor_context as build_single_transistor_context
-from .workflow_manifest import workflow_document_contract
+from .workflow_manifest import canonical_sha256, workflow_document_contract
 from .workflow_types import (
     ApprovalReferenceInput,
     DesignIntentDraftInput,
@@ -736,7 +736,7 @@ def score_transistor_adapter(
     compiler_identity: dict[str, Any],
     klayout_executable: str | None = None,
 ) -> McpToolResult:
-    """Score reproduced train/logical-validation cells without claiming sealed evaluation or foundry legality."""
+    """Score a distinct stream; compiler identity pins id/version/code hash, without claiming an execution receipt."""
 
     try:
         roots = _onboarding_roots()
@@ -793,6 +793,23 @@ def register_transistor_adapter_candidate(candidate_sha256: str) -> McpToolResul
                 details={"field": "candidate_sha256", "value": candidate_sha256, "error_type": type(exc).__name__, "stage": "adapter_registration"},
                 next_action="Use the exact hash returned by build_transistor_adapter_candidate.",
             ) from exc
+        if (
+            not isinstance(package, dict)
+            or package.get("schema_version") != 1
+            or package.get("artifact_type") != "TechnologyAdapterPackage"
+            or canonical_sha256(package) != candidate_sha256
+        ):
+            raise AnalysisError(
+                code="TECH_ADAPTER_CANDIDATE_PACKAGE_INVALID",
+                message="Candidate metadata does not match its requested content address or schema.",
+                details={
+                    "field": "candidate_sha256",
+                    "expected": candidate_sha256,
+                    "received": canonical_sha256(package) if isinstance(package, dict) else None,
+                    "stage": "adapter_registration",
+                },
+                next_action="Restore the exact untouched candidate package returned by the builder.",
+            )
         host = _default_host_components()
         registered = host.technology_registry.register_package(package)
         snapshot = host.technology_registry.snapshot()

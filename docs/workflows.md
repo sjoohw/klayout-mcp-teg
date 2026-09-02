@@ -221,13 +221,19 @@ Parameter schema에는 Gate length, CPP, planar width, nFin과 cell height 같�
 단위로 등록할 수 있다. 각 DUT row는 schema의 모든 값을 가져야 한다. Validation DUT는 이 모듈의
 fitting 계산에서 제외하지만 같은 source GDS와 metadata에 남는다. 따라서 현재 경계는 sealed holdout이
 아닌 logical partition이다.
+`kind=integer` 값은 실제 정수여야 한다. 각 terminal은 존재하는 semantic `layer_role`을 명시하고,
+각 DUT의 topology는 corpus topology와 정확히 같아야 한다.
 
 같은 parameter row인데 geometry가 다르면 `onboard_transistor_corpus`는 어느 reference DUT를 따를지
 묻는다. 사용자의 결정은 immutable resolution artifact에 기록된다. 관측된 invariant metric은
 drawing-style 후보이며 공정 규칙으로 승격되지 않는다.
 
 Score는 reproduced train/validation cell을 실제로 다시 읽어 비교한다. 원본 corpus GDS 자체를
-reproduced output으로 제출하면 candidate evidence로 인정하지 않는다. 통과한 candidate도
+reproduced output으로 제출하면 candidate evidence로 인정하지 않는다. 원본과 SHA가 다른 결과는
+`distinct_stream_logical_validation_no_execution_receipt`로만 표시한다. Resolution/scorecard/candidate를
+소비할 때 directory hash, schema/type, partition, unresolved blocker, compiler code hash와
+technology/device/topology 결속을 다시 확인한다. 이 검사는 변조·불일치 방지이며 producer 서명이나
+compiler 실행 receipt를 대신하지 않는다. 통과한 candidate도
 `candidate_scored_logical_validation_not_foundry_qualified` 상태다. 현재 corpus workflow는 CPP와 연계된 Gate/Active/
 Contact/implant/terminal dependency recipe를 자동 합성하거나 callable transistor PCell을 만들지 않는다.
 

@@ -128,3 +128,58 @@ def test_registry_restart_rejects_tampered_persisted_package(tmp_path: Path) -> 
         TechnologyAdapterRegistry(tmp_path)
 
     assert caught.value.code == "TECH_REGISTRY_PERSISTED_HASH_MISMATCH"
+
+
+def test_revocation_order_survives_restart_when_timestamps_go_backward(
+    tmp_path: Path,
+) -> None:
+    registry = TechnologyAdapterRegistry(tmp_path)
+    registered = registry.register_package(_package())
+    registry.append_lifecycle_record(
+        package_sha256=registered["package_sha256"],
+        action="qualified",
+        reason="qualification completed",
+        recorded_at="2026-09-02T10:00:00Z",
+        signer_reference="host-trust://review-board",
+        signature_sha256="e" * 64,
+    )
+    revoked = registry.append_lifecycle_record(
+        package_sha256=registered["package_sha256"],
+        action="revoked",
+        reason="evidence invalidated",
+        recorded_at="2026-09-02T09:00:00Z",
+        signer_reference="host-trust://review-board",
+        signature_sha256="f" * 64,
+    )
+
+    assert revoked["record"]["sequence"] == 2
+    assert revoked["record"]["prev_record_sha256"] is not None
+    for candidate in (registry, TechnologyAdapterRegistry(tmp_path)):
+        with pytest.raises(AnalysisError) as caught:
+            candidate.resolve(_package()["identity"])
+        assert caught.value.code == "TECH_ADAPTER_REVOKED"
+
+
+def test_revocation_is_terminal_for_exact_package(tmp_path: Path) -> None:
+    registry = TechnologyAdapterRegistry(tmp_path)
+    registered = registry.register_package(_package())
+    registry.append_lifecycle_record(
+        package_sha256=registered["package_sha256"],
+        action="revoked",
+        reason="evidence invalidated",
+        recorded_at="2026-09-02T10:00:00Z",
+        signer_reference="host-trust://review-board",
+        signature_sha256="e" * 64,
+    )
+
+    with pytest.raises(AnalysisError) as caught:
+        registry.append_lifecycle_record(
+            package_sha256=registered["package_sha256"],
+            action="qualified",
+            reason="attempted revival",
+            recorded_at="2026-09-02T11:00:00Z",
+            signer_reference="host-trust://review-board",
+            signature_sha256="f" * 64,
+        )
+
+    assert caught.value.code == "TECH_ADAPTER_REVOKED_TERMINAL_STATE"
