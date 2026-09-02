@@ -56,6 +56,29 @@ def _create_source(tmp_path: Path) -> tuple[Path, str]:
     return source, str(executable)
 
 
+def _create_reproduced(tmp_path: Path, executable: str) -> Path:
+    reproduced = tmp_path / "reproduced.gds"
+    script = Path(__file__).parent / "fixtures" / "create_dut_corpus.py"
+    completed = subprocess.run(
+        [
+            executable,
+            "-b",
+            "-r",
+            str(script),
+            "-rd",
+            f"output_path={reproduced}",
+            "-rd",
+            "variant_marker=7",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return reproduced
+
+
 def test_labeled_corpus_round_trip_scoring_and_candidate_package(tmp_path: Path) -> None:
     source, executable = _create_source(tmp_path)
     corpus = onboard_dut_corpus(
@@ -66,7 +89,7 @@ def test_labeled_corpus_round_trip_scoring_and_candidate_package(tmp_path: Path)
         parameter_schema={"gate_length_nm": {"unit": "nm", "kind": "continuous"}},
         dut_records=_records(),
         layer_roles={"active": {"layer": 2, "datatype": 0}, "gate": {"layer": 6, "datatype": 0}},
-        sealed_holdout_dut_ids=["D3"],
+        validation_dut_ids=["D3"],
         package_root=tmp_path / "corpora",
         expected_dbu_um=0.001,
         klayout_executable=executable,
@@ -81,7 +104,7 @@ def test_labeled_corpus_round_trip_scoring_and_candidate_package(tmp_path: Path)
         resolved_by="reviewer://device-team",
         resolved_at="2026-09-02T00:00:00Z",
     )
-    score = score_reproduced_corpus(
+    replay_score = score_reproduced_corpus(
         corpus_package_path=corpus["package_path"],
         reproduced_layout_path=str(source),
         reproduced_cell_by_dut_id={"D1": "DUT_50", "D2": "DUT_100", "D3": "DUT_150"},
@@ -95,7 +118,36 @@ def test_labeled_corpus_round_trip_scoring_and_candidate_package(tmp_path: Path)
         compiler_identity={"compiler_id": "reference-replay", "compiler_version": "1"},
         klayout_executable=executable,
     )
-    assert score["scorecard"]["cohorts"]["sealed_holdout"]["passed"] is True
+    assert replay_score["scorecard"]["reference_source_replayed"] is True
+    assert replay_score["scorecard"]["all_required_cohorts_passed"] is False
+    with pytest.raises(AnalysisError) as replay_error:
+        build_technology_adapter_candidate(
+            corpus_package_path=corpus["package_path"],
+            resolution_package_path=resolution["package_path"],
+            scorecard_package_path=replay_score["package_path"],
+            adapter_identity=_identity(),
+            compiler_code_sha256="f" * 64,
+            adapter_root=tmp_path / "replay-adapters",
+        )
+    assert replay_error.value.code == "REFERENCE_LAYOUT_REPLAY_NOT_REPRODUCTION_EVIDENCE"
+
+    reproduced = _create_reproduced(tmp_path, executable)
+    score = score_reproduced_corpus(
+        corpus_package_path=corpus["package_path"],
+        reproduced_layout_path=str(reproduced),
+        reproduced_cell_by_dut_id={"D1": "DUT_50", "D2": "DUT_100", "D3": "DUT_150"},
+        scoring_policy={
+            "absolute_tolerance": 1e-12,
+            "relative_tolerance": 1e-12,
+            "minimum_aggregate_score": 1.0,
+            "exact_fingerprint_required": True,
+        },
+        scorecard_root=tmp_path / "scores",
+        compiler_identity={"compiler_id": "fixture-regenerator", "compiler_version": "1"},
+        klayout_executable=executable,
+    )
+    assert score["scorecard"]["reference_source_replayed"] is False
+    assert score["scorecard"]["cohorts"]["logical_validation"]["passed"] is True
     candidate = build_technology_adapter_candidate(
         corpus_package_path=corpus["package_path"],
         resolution_package_path=resolution["package_path"],
@@ -104,7 +156,7 @@ def test_labeled_corpus_round_trip_scoring_and_candidate_package(tmp_path: Path)
         compiler_code_sha256="f" * 64,
         adapter_root=tmp_path / "adapters",
     )
-    assert candidate["package"]["status"] == "candidate_scored_not_foundry_qualified"
+    assert candidate["package"]["status"] == "candidate_scored_logical_validation_not_foundry_qualified"
     registry = TechnologyAdapterRegistry()
     registered = registry.register_package(candidate["package"])
     assert registry.resolve(_identity(), expected_package_sha256=registered["package_sha256"])["fallback_used"] is False
@@ -140,7 +192,7 @@ def test_same_parameters_different_geometry_requires_reference_choice(tmp_path: 
         parameter_schema={"gate_length_nm": {"unit": "nm", "kind": "continuous"}},
         dut_records=records,
         layer_roles={"active": {"layer": 2, "datatype": 0}},
-        sealed_holdout_dut_ids=["D3"],
+        validation_dut_ids=["D3"],
         package_root=tmp_path / "corpora",
         worker_runner=worker,
     )

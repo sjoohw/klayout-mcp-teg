@@ -106,8 +106,9 @@ conceptual fixture가 있을 뿐 실제 transistor 생성 경로에 통합돼 �
 MCP는 DUT 사이에서 항상 같은 도형 특징을 찾아 drawing style 후보로 기록한다. 같은 parameter인데
 도형이 다른 DUT가 있으면 어느 DUT를 따를지 사용자에게 묻는다. 차이를 몰래 평균내지 않는다.
 
-새로 재현한 DUT GDS가 있으면 원본 DUT와 비교해 점수를 낼 수 있다. 학습에 쓰지 않은 holdout DUT도
-따로 검사한다. 통과한 결과는 공정과 버전별 adapter 후보로 저장해 다음 작업에서 다시 찾을 수 있다.
+새로 재현한 DUT GDS가 있으면 원본 DUT와 비교해 점수를 낼 수 있다. 일부 DUT는 계산에서 빼두었다가
+검사용으로 따로 비교한다. 다만 그 DUT도 원본 파일 안에 보이므로 비밀 시험 문제는 아니다. 원본 GDS를
+그대로 답으로 제출하면 통과시키지 않는다. 통과한 결과는 공정과 버전별 adapter 후보로 저장한다.
 
 이 과정은 CPP가 바뀔 때 Gate, Active, Contact가 어떻게 함께 움직이는지 자동으로 알아내는 기능은
 아니다. 현재는 입력 검사, 비교, 질문, 점수 계산과 후보 저장까지 구현돼 있다. 실제 DUT를 만드는
@@ -176,7 +177,7 @@ Skill이 없어도 MCP 서버는 실행된다. 다른 컴퓨터에서는 저장�
 - Reference GDS에서 보이는 drawing style을 정리한다.
 - 실제 Pad macro를 수정하지 않고 별도 top cell에 배치한다.
 - 여러 labeled DUT를 등록하고 누락 정보와 설명되지 않은 차이를 찾는다.
-- 재현 DUT를 train/holdout으로 나눠 비교하고 공정별 adapter 후보를 저장한다.
+- 재현 DUT를 train/검사용 그룹으로 나눠 비교하고 공정별 adapter 후보를 저장한다.
 - Direct Phase 1의 계산 경로를 여러 rail과 cross-tie가 있는 mesh로 바꾼다.
 - 제한된 PCell split batch를 만든다.
 - 작업 상태와 입력 근거를 파일로 남긴다.
@@ -202,7 +203,7 @@ DRC는 도형 규칙 검사다. LVS는 도면과 회로 연결 비교다. PEX는
 2. MCP host에 이 저장소의 실행 명령을 등록한다.
 3. `onboarding.md`의 공정 입력, 실제 Pad macro와 labeled DUT 표를 준비한다.
 4. Pad와 DUT corpus를 등록하고, 누락 정보와 DUT별 차이를 먼저 해결한다.
-5. 공정별 compiler가 만든 DUT를 원본과 holdout으로 비교해 adapter 후보를 등록한다.
+5. 공정별 compiler가 만든 DUT를 원본의 train/검사용 그룹과 비교해 adapter 후보를 등록한다.
 6. 실제 adapter와 Pad/mesh 연결이 준비된 공정만 대표 DUT 하나로 pilot GDS를 만든다.
 7. KLayout과 foundry 검증 환경에서 pilot을 확인한 뒤 전체 split을 만든다.
 

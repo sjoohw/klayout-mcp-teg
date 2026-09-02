@@ -33,12 +33,20 @@ def test_worker_start_failure_is_not_reported_as_snapshot_failure(
     assert caught.value.code == "KLAYOUT_START_FAILED"
 
 
-def test_klayout_not_found_guidance_matches_windows_shell() -> None:
-    guidance = _klayout_not_found_next_action()
+@pytest.mark.parametrize(
+    ("platform_name", "required", "forbidden"),
+    [
+        ("nt", ("PowerShell", "$env:KLAYOUT_EXE"), ("setenv",)),
+        ("posix", ("export KLAYOUT_EXE", "setenv KLAYOUT_EXE"), ("PowerShell",)),
+    ],
+)
+def test_klayout_not_found_guidance_matches_platform_shell(
+    platform_name, required, forbidden
+) -> None:
+    guidance = _klayout_not_found_next_action(platform_name)
 
-    assert "PowerShell" in guidance
-    assert "$env:KLAYOUT_EXE" in guidance
-    assert "setenv" not in guidance
+    assert all(value in guidance for value in required)
+    assert all(value not in guidance for value in forbidden)
 
 
 def test_worker_timeout_is_structured(tmp_path, monkeypatch) -> None:

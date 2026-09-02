@@ -161,8 +161,9 @@ def find_klayout_executable(explicit_path: str | None = None) -> Path:
     )
 
 
-def _klayout_not_found_next_action() -> str:
-    if os.name == "nt":
+def _klayout_not_found_next_action(platform_name: str | None = None) -> str:
+    selected_platform = os.name if platform_name is None else platform_name
+    if selected_platform == "nt":
         return (
             "Set KLAYOUT_EXE to klayout_app.exe. In PowerShell use: "
             "$env:KLAYOUT_EXE = 'C:\\Program Files\\KLayout\\klayout_app.exe'"

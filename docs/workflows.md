@@ -16,7 +16,7 @@
 | Non-array occurrence의 direct box 한 축을 resize한 static split GDS 생성 | PCellizer workflow | 제한 지원 | one parameter, row별 standalone GDS; reusable PCell 아님 |
 | 실제 Pad macro 등록·보존 배치 | `register_pad_macro` → `compose_registered_pad_macro` | 지원 | Source Pad subtree를 수정하지 않는 overlay GDS |
 | Labeled transistor corpus 등록·검토 | `onboard_transistor_corpus` → `resolve_transistor_corpus` | 지원 | Coverage, invariant style, ambiguity와 human resolution artifact |
-| 재현 DUT score·candidate 저장 | `score_transistor_adapter` → build/register candidate | 제한 지원 | Train/holdout score와 exact registry entry; callable transistor compiler 아님 |
+| 재현 DUT score·candidate 저장 | `score_transistor_adapter` → build/register candidate | 제한 지원 | Train/logical-validation score와 exact registry entry; callable transistor compiler 아님 |
 | Node별 reference 관리 | Reference Library workflow | 지원 | immutable reference selection |
 | Persistent job | `teg_intake` | 제한 지원 | Stock은 bundled research-only Kelvin resistor profile/version만 지원 |
 | Persistent plan/generate/verify | 4-call facade | host 통합 필요 | resumable evidence chain |
@@ -31,7 +31,7 @@
 | `expert` | 등록된 전체 surface | Conceptual, incomplete Phase 1과 runnable tool을 구분할 수 있는 개발자/operator 전용 |
 | `facade` | Persistent facade | `server_status`와 persistent 4-call/status; stock은 `teg_plan`에서 planning 전 fail-closed |
 | `drawing` | 범용 drawing surface | 범용 draw/inspect/style/compare와 standalone mesh/contact planner; Phase 1 없음 |
-| `onboarding` | Pad/DUT example onboarding | Immutable pad macro, labeled DUT corpus, variation resolution, holdout score와 candidate package |
+| `onboarding` | Pad/DUT example onboarding | Immutable pad macro, labeled DUT corpus, variation resolution, logical-validation score와 candidate package |
 
 잘못된 mode는 `expert`로 fallback하지 않고 시작 시 실패한다.
 `server_status.tool_surface.active_tools`, `capabilities`, `recommended_entrypoints`와
@@ -218,15 +218,17 @@ onboard_transistor_corpus
 ```
 
 Parameter schema에는 Gate length, CPP, planar width, nFin과 cell height 같은 필요한 축을 모두 이름과
-단위로 등록할 수 있다. 각 DUT row는 schema의 모든 값을 가져야 한다. Holdout DUT는 fitting 전에
-분리한다.
+단위로 등록할 수 있다. 각 DUT row는 schema의 모든 값을 가져야 한다. Validation DUT는 이 모듈의
+fitting 계산에서 제외하지만 같은 source GDS와 metadata에 남는다. 따라서 현재 경계는 sealed holdout이
+아닌 logical partition이다.
 
 같은 parameter row인데 geometry가 다르면 `onboard_transistor_corpus`는 어느 reference DUT를 따를지
 묻는다. 사용자의 결정은 immutable resolution artifact에 기록된다. 관측된 invariant metric은
 drawing-style 후보이며 공정 규칙으로 승격되지 않는다.
 
-Score는 reproduced train/holdout cell을 실제로 다시 읽어 비교한다. 통과한 candidate도
-`candidate_scored_not_foundry_qualified` 상태다. 현재 corpus workflow는 CPP와 연계된 Gate/Active/
+Score는 reproduced train/validation cell을 실제로 다시 읽어 비교한다. 원본 corpus GDS 자체를
+reproduced output으로 제출하면 candidate evidence로 인정하지 않는다. 통과한 candidate도
+`candidate_scored_logical_validation_not_foundry_qualified` 상태다. 현재 corpus workflow는 CPP와 연계된 Gate/Active/
 Contact/implant/terminal dependency recipe를 자동 합성하거나 callable transistor PCell을 만들지 않는다.
 
 ## PCellizer

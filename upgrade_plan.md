@@ -542,12 +542,14 @@ example layout + DUT parameter manifest
 
 Upgrade checkpoint 진행:
 
-- [x] 여러 labeled DUT cell과 parameter row, semantic layer/terminal mapping, sealed holdout을 받는 corpus
-  artifact와 coverage/identifiability gate를 구현했다.
+- [x] 여러 labeled DUT cell과 parameter row, semantic layer/terminal mapping, logical validation partition을
+  받는 corpus artifact와 coverage/identifiability gate를 구현했다. 같은 source에 geometry가 보이므로
+  sealed holdout이라고 주장하지 않는다.
 - [x] Observed invariant style metric과 same-parameter/different-geometry ambiguity를 검출하고, 사용자가
   따를 DUT/policy를 immutable resolution manifest로 선택하도록 했다.
-- [x] Reproduced GDS를 실제로 다시 읽어 train/holdout을 분리 scoring하고, 모두 통과한 경우에만
-  `candidate_scored_not_foundry_qualified` package를 exact registry에 등록할 수 있다.
+- [x] Reproduced GDS를 실제로 다시 읽어 train/validation을 분리 scoring한다. 원본 stream replay는
+  evidence에서 제외하고, 별도 stream이 모두 통과한 경우에만
+  `candidate_scored_logical_validation_not_foundry_qualified` package를 exact registry에 등록할 수 있다.
 - [ ] Corpus로부터 CPP 연계 Poly/Active/contact/implant/terminal dependency recipe를 자동 합성하는
   process-specific compiler는 만들지 않았다. 실제 labeled corpus, topology 규칙과 foundry 검증 없이는
   한 GDS에서 이를 추론하지 않으며 candidate score를 PCell/electrical/foundry 동등성으로 승격하지 않는다.
@@ -555,7 +557,7 @@ Upgrade checkpoint 진행:
 완료 기준:
 
 - 승인된 21-row DOE corpus 전체의 parameter/geometry coverage matrix와 identifiability report가 생성된다.
-- Candidate fitting 전에 corpus partition이 봉인되고 holdout 접근 leakage가 0건이다. Split/policy를 바꾸면
+- [ ] Candidate fitting 전에 별도 권한 경계로 corpus partition이 실제 봉인되고 holdout 접근 leakage가 0건이다. 현재 구현은 logical partition뿐이다. Split/policy를 바꾸면
   새 package candidate가 되며 기존 score를 재사용하지 않는다.
 - 모든 parameter-correlated dependency와 observed-invariant style에 supporting DUT와 반례/범위가 기록된다.
 - Style outlier와 설명되지 않은 DUT 차이 100%가 user-approved resolution 또는 명시적 unresolved blocker를 가진다.
@@ -784,6 +786,14 @@ Upgrade checkpoint 진행:
 - CI csh job은 현재의 online Ubuntu `uv sync` + EOF smoke를 넘어 실제 offline deployment 경로와
   MCP initialize/tools/list/status 및 KLayout read/write를 시험한다.
 - 이 절의 통과는 `qualification.runtime=rhel_csh_runtime_qualified`만 발행한다.
+
+#### 배포 라이선스 gate
+
+- [ ] Repository owner가 project license를 명시적으로 선택해 최상위 `LICENSE`와 package metadata에
+  반영한다. 구현자가 임의로 라이선스를 선택하지 않는다.
+- [ ] `examples/external/nangate45/`의 원 출처, 정확한 license text와 재배포 허용 범위를 확인한다.
+  확인 전에는 release/archive/bundle에서 제외하거나 별도 취득 절차로 대체한다.
+- [ ] Third-party notice, dependency license inventory와 배포 bundle의 SBOM을 같은 release에서 검증한다.
 
 #### Model/runtime 교차 gate
 

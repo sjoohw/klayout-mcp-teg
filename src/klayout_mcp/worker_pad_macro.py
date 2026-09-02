@@ -132,7 +132,10 @@ def inspect_pad_macro(request):
             ("top", shape_bbox.top - bbox.top, max(bbox.left, shape_bbox.left), min(bbox.right, shape_bbox.right)),
         )
         for edge, signed_distance, start, stop in candidates:
-            if signed_distance <= tolerance_dbu and stop > start:
+            # A negative signed distance means the access shape is inset from
+            # the macro boundary.  Treating every negative value as eligible
+            # falsely advertised all four edges for an internal-only metal.
+            if abs(signed_distance) <= tolerance_dbu and stop > start:
                 horizontal = edge in {"bottom", "top"}
                 coordinate = (
                     bbox.bottom if edge == "bottom" else bbox.top if edge == "top" else bbox.left if edge == "left" else bbox.right
@@ -270,6 +273,39 @@ def compose_pad_macro_overlay(request):
     os.unlink(temporary)
     try:
         layout.write(temporary)
+        verify = pya.Layout()
+        try:
+            verify.read(temporary)
+            verify_source = verify.cell(source_cell.name)
+            verify_top = verify.cell(top_name)
+            fresh_fingerprint = (
+                None
+                if verify_source is None
+                else _geometry_fingerprint(verify, verify_source)
+            )
+        except Exception as exc:
+            return worker_error(
+                "PAD_MACRO_FRESH_RELOAD_VERIFICATION_FAILED",
+                "The staged pad overlay could not be fresh-reloaded.",
+                {
+                    "error_type": type(exc).__name__,
+                    "stage": "pad_macro_compose",
+                    "final_output_published": False,
+                },
+                "Inspect stream serialization compatibility before publishing a new output.",
+            )
+        if verify_top is None or fresh_fingerprint != before_fingerprint:
+            return worker_error(
+                "PAD_MACRO_FRESH_RELOAD_VERIFICATION_FAILED",
+                "Fresh reload did not preserve the source pad cell geometry.",
+                {
+                    "expected": before_fingerprint,
+                    "received": fresh_fingerprint,
+                    "stage": "pad_macro_compose",
+                    "final_output_published": False,
+                },
+                "Reject the staged output and inspect stream serialization compatibility.",
+            )
         try:
             publish_new_file(temporary, output_path)
         except OutputAlreadyExistsError:
@@ -282,18 +318,6 @@ def compose_pad_macro_overlay(request):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    verify = pya.Layout()
-    verify.read(output_path)
-    verify_source = verify.cell(source_cell.name)
-    verify_top = verify.cell(top_name)
-    fresh_fingerprint = _geometry_fingerprint(verify, verify_source)
-    if verify_top is None or fresh_fingerprint != before_fingerprint:
-        return worker_error(
-            "PAD_MACRO_FRESH_RELOAD_VERIFICATION_FAILED",
-            "Fresh reload did not preserve the source pad cell geometry.",
-            {"expected": before_fingerprint, "received": fresh_fingerprint, "stage": "pad_macro_compose"},
-            "Reject the generated output and inspect stream serialization compatibility.",
-        )
     return {
         "ok": True,
         "output_path": output_path,

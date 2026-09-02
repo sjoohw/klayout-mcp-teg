@@ -181,8 +181,18 @@ class HostComponents:
                     "blockers": blockers,
                 }
             )
+        blockers = []
+        if not profiles:
+            blockers.append("WORKFLOW_ENGINE_REGISTRY_EMPTY")
+        if not provider_ready:
+            blockers.append("PROCESS_CAPABILITY_PROVIDER_UNAVAILABLE")
+        if not approval_ready:
+            blockers.append("APPROVAL_VERIFIER_UNAVAILABLE")
+        if not output["supported_filesystem"]:
+            blockers.append("UNSUPPORTED_PUBLICATION_FILESYSTEM")
         return {
-            "ok": all(not profile["blockers"] for profile in profiles),
+            "ok": not blockers and all(not profile["blockers"] for profile in profiles),
+            "blockers": blockers,
             "output_publication": output,
             "approval_verifier_configured": approval_ready,
             "process_provider_configured": provider_ready,

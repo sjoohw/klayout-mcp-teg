@@ -112,6 +112,37 @@ def test_installed_klayout_inspects_recursive_40um_pad_macro(tmp_path: Path) -> 
     }
 
 
+def test_internal_access_metal_is_not_reported_as_edge_landing(tmp_path: Path) -> None:
+    try:
+        executable = find_klayout_executable()
+    except AnalysisError:
+        pytest.skip("KLayout executable is not installed")
+    source = tmp_path / "inset-pad.gds"
+    script = Path(__file__).parent / "fixtures" / "create_inset_pad_macro.py"
+    completed = subprocess.run(
+        [str(executable), "-b", "-r", str(script), "-rd", f"output_path={source}"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    result = run_klayout_worker(
+        {
+            "operation": "inspect_pad_macro",
+            "layout_path": str(source),
+            "top_cell": "PAD_MACRO_40X40",
+            "access_layer": {"layer": 10, "datatype": 0},
+            "edge_tolerance_um": 0.001,
+        },
+        executable_path=str(executable),
+    )
+
+    assert result["ok"] is True, result
+    assert result["eligible_edge_landings"] == []
+
+
 def test_installed_klayout_composes_without_editing_pad_cell(tmp_path: Path) -> None:
     try:
         executable = find_klayout_executable()

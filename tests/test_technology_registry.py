@@ -93,3 +93,38 @@ def test_revocation_is_append_only_and_blocks_resolution(tmp_path: Path) -> None
     snapshot = registry.snapshot()
     assert snapshot["snapshot"]["lookup_policy"] == "exact_only_no_alias_or_fallback"
     assert (tmp_path / "snapshots" / f"{snapshot['snapshot_sha256']}.json").is_file()
+
+
+def test_registry_reloads_packages_and_lifecycle_after_restart(tmp_path: Path) -> None:
+    first = TechnologyAdapterRegistry(tmp_path)
+    registered = first.register_package(_package())
+    first.append_lifecycle_record(
+        package_sha256=registered["package_sha256"],
+        action="qualified",
+        reason="reviewed geometry pilot",
+        recorded_at="2026-09-02T00:00:00Z",
+        signer_reference="host-trust://review-board",
+        signature_sha256="e" * 64,
+    )
+
+    restarted = TechnologyAdapterRegistry(tmp_path)
+    resolved = restarted.resolve(
+        _package()["identity"],
+        expected_package_sha256=registered["package_sha256"],
+    )
+
+    assert restarted.contract()["registered_package_count"] == 1
+    assert resolved["qualified"] is True
+    assert resolved["lifecycle"][0]["action"] == "qualified"
+
+
+def test_registry_restart_rejects_tampered_persisted_package(tmp_path: Path) -> None:
+    registry = TechnologyAdapterRegistry(tmp_path)
+    registered = registry.register_package(_package())
+    package_path = tmp_path / "packages" / f"{registered['package_sha256']}.json"
+    package_path.write_text('{"schema_version":1}\n', encoding="utf-8")
+
+    with pytest.raises(AnalysisError) as caught:
+        TechnologyAdapterRegistry(tmp_path)
+
+    assert caught.value.code == "TECH_REGISTRY_PERSISTED_HASH_MISMATCH"

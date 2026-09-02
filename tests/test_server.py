@@ -1,3 +1,4 @@
+from klayout_mcp import server
 from klayout_mcp.server import (
     analyze_pad_boxes,
     assemble_teg,
@@ -58,6 +59,39 @@ def test_teg_status_missing_job_is_read_only(tmp_path, monkeypatch) -> None:
     assert result["code"] == "WORKFLOW_JOB_NOT_FOUND"
     assert not workflow_root.exists()
     assert not output_root.exists()
+
+
+def test_deployment_workflow_roots_drive_status_and_onboarding(
+    tmp_path, monkeypatch
+) -> None:
+    workflow_root = tmp_path / "deployed-workflow"
+    output_root = tmp_path / "deployed-output"
+    deployment_path = tmp_path / "deployment.toml"
+    deployment_path.write_text(
+        "\n".join(
+            (
+                "schema_version = 1",
+                "",
+                "[paths]",
+                f'workflow_root = "{workflow_root.as_posix()}"',
+                f'output_root = "{output_root.as_posix()}"',
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KLAYOUT_MCP_DEPLOYMENT_TOML", str(deployment_path))
+    monkeypatch.setenv("KLAYOUT_MCP_WORKFLOW_ROOT", str(tmp_path / "wrong-workflow"))
+    monkeypatch.setenv(
+        "KLAYOUT_MCP_WORKFLOW_OUTPUT_ROOT", str(tmp_path / "wrong-output")
+    )
+
+    selected_workflow, selected_output = server._default_workflow_roots()
+    onboarding = server._onboarding_roots()
+
+    assert selected_workflow == workflow_root
+    assert selected_output == output_root
+    assert onboarding["corpora"] == workflow_root / "onboarding" / "dut-corpora"
+    assert onboarding["pad_outputs"] == output_root / "onboarding-pad-overlays"
 
 
 def test_server_status() -> None:

@@ -36,7 +36,7 @@ def _validate_inputs(
     parameter_schema: Mapping[str, Any],
     dut_records: list[Mapping[str, Any]],
     layer_roles: Mapping[str, Any],
-    sealed_holdout_dut_ids: list[str],
+    validation_dut_ids: list[str],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     if not isinstance(parameter_schema, Mapping) or not parameter_schema:
         _fail(
@@ -155,14 +155,14 @@ def _validate_inputs(
                 next_action="Provide the exact semantic layermap entry.",
             )
         roles[str(role)] = {"layer": layer["layer"], "datatype": layer["datatype"]}
-    holdout = set(sealed_holdout_dut_ids)
+    holdout = set(validation_dut_ids)
     unknown = sorted(holdout.difference(ids))
     if not holdout or unknown or holdout == ids:
         _fail(
             "DUT_CORPUS_HOLDOUT_INVALID",
-            "A non-empty sealed holdout subset distinct from training DUTs is required before fitting.",
-            details={"field": "sealed_holdout_dut_ids", "unknown": unknown, "dut_ids": sorted(ids)},
-            next_action="Select at least one existing DUT for sealed holdout and leave at least one training DUT.",
+            "A non-empty logical validation subset distinct from training DUTs is required before fitting.",
+            details={"field": "validation_dut_ids", "unknown": unknown, "dut_ids": sorted(ids)},
+            next_action="Select at least one existing DUT for logical validation and leave at least one training DUT.",
         )
     return schema, normalized, roles
 
@@ -201,7 +201,7 @@ def onboard_dut_corpus(
     parameter_schema: Mapping[str, Any],
     dut_records: list[Mapping[str, Any]],
     layer_roles: Mapping[str, Any],
-    sealed_holdout_dut_ids: list[str],
+    validation_dut_ids: list[str],
     package_root: str | Path,
     expected_dbu_um: float | None = None,
     klayout_executable: str | None = None,
@@ -214,7 +214,7 @@ def onboard_dut_corpus(
         parameter_schema=parameter_schema,
         dut_records=dut_records,
         layer_roles=layer_roles,
-        sealed_holdout_dut_ids=sealed_holdout_dut_ids,
+        validation_dut_ids=validation_dut_ids,
     )
     if not isinstance(technology_identity, Mapping) or not technology_identity:
         _fail(
@@ -288,7 +288,7 @@ def onboard_dut_corpus(
                         ),
                     )
                 )
-        training = [record for record in enriched if record["dut_id"] not in set(sealed_holdout_dut_ids)]
+        training = [record for record in enriched if record["dut_id"] not in set(validation_dut_ids)]
         identifiability_issues = []
         for parameter_name in sorted(schema):
             distinct = sorted(
@@ -320,8 +320,13 @@ def onboard_dut_corpus(
                 invariants.append({"metric": metric, "value": values[0], "supporting_dut_ids": [record["dut_id"] for record in training]})
         partition = {
             "train_dut_ids": [record["dut_id"] for record in training],
-            "sealed_holdout_dut_ids": list(sealed_holdout_dut_ids),
+            "validation_dut_ids": list(validation_dut_ids),
             "split_policy": "user_selected_before_model_fit",
+            # The preserved source stream and metadata still contain every DUT.
+            # This partition prevents accidental fitting in this module, but it
+            # is not a permission boundary and must not be sold as a sealed eval.
+            "isolation_level": "logical_partition_only_source_geometry_visible",
+            "generalization_claim_allowed": False,
         }
         corpus = {
             "schema_version": 1,
@@ -376,7 +381,7 @@ def onboard_dut_corpus(
         next_action=(
             "Add missing parameter coverage and resolve every drawing-precedent question before fitting."
             if questions or identifiability_issues
-            else "Fit and score the adapter against the sealed holdout."
+            else "Fit on the training IDs and score the separate logical validation IDs."
         ),
         retry_stage="corpus_resolution",
         resume_token=package_sha256,
@@ -535,7 +540,7 @@ def score_reproduced_corpus(
     timeout_seconds: float = 60.0,
     worker_runner=run_klayout_worker,
 ) -> dict[str, Any]:
-    """Score an actual reproduced layout against train and sealed-holdout DUTs."""
+    """Score a reproduced layout against training and logical-validation DUTs."""
 
     _, corpus, corpus_sha256 = _load_corpus_package(corpus_package_path)
     required_policy = {"absolute_tolerance", "relative_tolerance", "minimum_aggregate_score", "exact_fingerprint_required"}
@@ -568,6 +573,9 @@ def score_reproduced_corpus(
             next_action="Map every reference DUT ID to its reproduced output cell.",
         )
     with create_layout_snapshot(reproduced_layout_path, purpose="layout") as snapshot:
+        reference_source_replayed = snapshot.sha256 == corpus.get(
+            "source_layout_sha256"
+        )
         analysis = worker_runner(
             {
                 "operation": "inspect_dut_corpus",
@@ -584,7 +592,12 @@ def score_reproduced_corpus(
         if not analysis.get("ok"):
             return analysis
         candidate_by_id = {item["dut_id"]: item for item in analysis["observations"]}
-        holdout = set(corpus["partition"]["sealed_holdout_dut_ids"])
+        holdout = set(
+            corpus["partition"].get(
+                "validation_dut_ids",
+                corpus["partition"].get("sealed_holdout_dut_ids", []),
+            )
+        )
         per_dut = []
         for dut_id in sorted(reference_by_id):
             reference = reference_by_id[dut_id]
@@ -618,7 +631,7 @@ def score_reproduced_corpus(
             dut_score = metric_score if not exact_required or fingerprint_match else 0.0
             per_dut.append({
                 "dut_id": dut_id,
-                "cohort": "sealed_holdout" if dut_id in holdout else "train_reference",
+                "cohort": "logical_validation" if dut_id in holdout else "train_reference",
                 "reference_geometry_fingerprint_sha256": reference["geometry_fingerprint_sha256"],
                 "candidate_geometry_fingerprint_sha256": candidate["geometry_fingerprint_sha256"],
                 "exact_geometry_match": fingerprint_match,
@@ -627,7 +640,7 @@ def score_reproduced_corpus(
                 "passed": dut_score >= threshold and not any(item["hard_fail"] for item in metrics),
             })
     cohorts = {}
-    for cohort in ("train_reference", "sealed_holdout"):
+    for cohort in ("train_reference", "logical_validation"):
         items = [item for item in per_dut if item["cohort"] == cohort]
         score = sum(item["aggregate_score"] for item in items) / len(items) if items else 0.0
         cohorts[cohort] = {
@@ -644,9 +657,22 @@ def score_reproduced_corpus(
         "scoring_policy_sha256": canonical_sha256(scoring_policy),
         "compiler_identity": immutable_json_copy(compiler_identity),
         "reproduced_layout_sha256": snapshot.sha256,
+        "reference_source_replayed": reference_source_replayed,
+        "evidence_class": (
+            "reference_replay_not_reproduction"
+            if reference_source_replayed
+            else "independent_stream_logical_validation"
+        ),
+        "holdout_isolation_level": corpus["partition"].get(
+            "isolation_level", "legacy_unspecified"
+        ),
+        "generalization_claim_allowed": False,
         "per_dut": per_dut,
         "cohorts": cohorts,
-        "all_required_cohorts_passed": all(item["passed"] for item in cohorts.values()),
+        "all_required_cohorts_passed": (
+            not reference_source_replayed
+            and all(item["passed"] for item in cohorts.values())
+        ),
         "scoring_scope": "recursive_polygon_fingerprint_and_layer_geometry_metrics",
         "foundry_drc_lvs_pex_included": False,
         "production_ready": False,
@@ -690,9 +716,22 @@ def build_technology_adapter_candidate(
             next_action="Regenerate evidence from the exact immutable corpus package.",
         )
     if not scorecard.get("all_required_cohorts_passed"):
+        if scorecard.get("reference_source_replayed"):
+            _fail(
+                "REFERENCE_LAYOUT_REPLAY_NOT_REPRODUCTION_EVIDENCE",
+                "The original corpus stream was submitted as its own reproduced output.",
+                details={
+                    "field": "scorecard.reference_source_replayed",
+                    "received": True,
+                },
+                next_action=(
+                    "Run the candidate compiler to create a separate output stream, "
+                    "then score that output."
+                ),
+            )
         _fail(
             "REFERENCE_SCORE_BELOW_GATE",
-            "The candidate did not pass every train/reference and sealed-holdout score gate.",
+            "The candidate did not pass every train/reference and logical-validation score gate.",
             details={"field": "scorecard.cohorts", "received": scorecard.get("cohorts")},
             next_action="Correct the compiler, reproduce the corpus again, and create a new scorecard.",
         )
@@ -707,7 +746,7 @@ def build_technology_adapter_candidate(
         "schema_version": 1,
         "identity": immutable_json_copy(adapter_identity),
         "artifact_type": "TechnologyAdapterPackage",
-        "status": "candidate_scored_not_foundry_qualified",
+        "status": "candidate_scored_logical_validation_not_foundry_qualified",
         "corpus_sha256": corpus_sha256,
         "partition_sha256": canonical_sha256(corpus["partition"]),
         "drawing_style_profile_sha256": canonical_sha256(corpus["drawing_style_profile"]),

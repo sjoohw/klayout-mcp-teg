@@ -107,6 +107,91 @@ class TechnologyAdapterRegistry:
             (self.root / "packages").mkdir(parents=True, exist_ok=True)
             (self.root / "lifecycle").mkdir(parents=True, exist_ok=True)
             (self.root / "snapshots").mkdir(parents=True, exist_ok=True)
+            self._load_from_disk()
+
+    @staticmethod
+    def _read_persisted_document(path: Path) -> dict[str, Any]:
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            _fail(
+                "TECH_REGISTRY_PERSISTED_DOCUMENT_INVALID",
+                "A persisted technology registry document is unreadable.",
+                details={"path": str(path), "error_type": type(exc).__name__},
+                next_action="Quarantine the registry root and restore it from trusted evidence.",
+            )
+        if not isinstance(document, dict):
+            _fail(
+                "TECH_REGISTRY_PERSISTED_DOCUMENT_INVALID",
+                "A persisted technology registry document is not a JSON object.",
+                details={"path": str(path), "received_type": type(document).__name__},
+                next_action="Quarantine the registry root and restore it from trusted evidence.",
+            )
+        actual = canonical_sha256(document)
+        if not SHA256_PATTERN.fullmatch(path.stem) or actual != path.stem:
+            _fail(
+                "TECH_REGISTRY_PERSISTED_HASH_MISMATCH",
+                "A persisted technology registry document no longer matches its filename hash.",
+                details={"path": str(path), "expected": path.stem, "received": actual},
+                next_action="Quarantine the registry root and restore the exact content-addressed document.",
+            )
+        return document
+
+    def _load_from_disk(self) -> None:
+        assert self.root is not None
+        for path in sorted((self.root / "packages").glob("*.json")):
+            document = self._read_persisted_document(path)
+            if document.get("schema_version") != 1:
+                _fail(
+                    "TECH_ADAPTER_PACKAGE_SCHEMA_UNSUPPORTED",
+                    "A persisted technology adapter package has an unsupported schema version.",
+                    details={"path": str(path), "value": document.get("schema_version")},
+                    next_action="Restore a schema_version 1 package or migrate it explicitly.",
+                )
+            key = TechnologyAdapterKey.from_mapping(document.get("identity", {}))
+            existing = self._packages.get(key)
+            if existing is not None and existing[0] != path.stem:
+                _fail(
+                    "TECH_ADAPTER_EXACT_KEY_CONFLICT",
+                    "Persisted packages contain two payloads for the same exact adapter key.",
+                    details={
+                        "identity": key.to_dict(),
+                        "first": existing[0],
+                        "second": path.stem,
+                    },
+                    next_action="Resolve the registry conflict using a new explicit package version.",
+                )
+            self._packages[key] = (path.stem, document)
+
+        lifecycle_records: list[tuple[str, str, dict[str, Any]]] = []
+        registered_hashes = {entry[0] for entry in self._packages.values()}
+        for path in sorted((self.root / "lifecycle").glob("*.json")):
+            record = self._read_persisted_document(path)
+            package_sha256 = record.get("package_sha256")
+            if package_sha256 not in registered_hashes:
+                _fail(
+                    "TECH_ADAPTER_PACKAGE_NOT_REGISTERED",
+                    "A persisted lifecycle record refers to an unavailable package.",
+                    details={"path": str(path), "package_sha256": package_sha256},
+                    next_action="Restore the referenced package before loading lifecycle evidence.",
+                )
+            if record.get("action") not in LIFECYCLE_ACTIONS:
+                _fail(
+                    "TECH_ADAPTER_LIFECYCLE_ACTION_INVALID",
+                    "A persisted lifecycle record has an unsupported action.",
+                    details={"path": str(path), "action": record.get("action")},
+                    next_action="Restore a qualified, deprecated, or revoked lifecycle record.",
+                )
+            recorded_at = record.get("recorded_at")
+            if not isinstance(recorded_at, str) or not recorded_at.strip():
+                _fail(
+                    "TECH_ADAPTER_LIFECYCLE_FIELD_REQUIRED",
+                    "A persisted lifecycle record is missing recorded_at.",
+                    details={"path": str(path), "field": "recorded_at"},
+                    next_action="Restore the complete signed lifecycle record.",
+                )
+            lifecycle_records.append((recorded_at, path.stem, record))
+        self._lifecycle = [record for _, _, record in sorted(lifecycle_records)]
 
     @staticmethod
     def _publish_document(directory: Path, digest: str, document: Mapping[str, Any]) -> None:

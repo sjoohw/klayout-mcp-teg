@@ -17,7 +17,7 @@ src/klayout_mcp/
 ├─ kelvin_*.py               SLN001 Kelvin profile
 ├─ phase1_*.py               R/MOM scaffold와 transistor-adapter blocker; synthetic Pad/mesh-route composition
 ├─ pad_macro.py              immutable Pad macro artifact와 overlay composition
-├─ dut_corpus.py             labeled DUT coverage/variation/holdout scoring
+├─ dut_corpus.py             labeled DUT coverage/variation/logical-validation scoring
 ├─ technology_registry.py    exact candidate package registry
 ├─ file_publication.py       local create-only file/directory publication
 ├─ host_factory.py           host component 조립과 preflight
@@ -75,7 +75,7 @@ lock provenance, OS/Python/KLayout, pass/skip/warning과 Actions URL을 가진 g
 - Phase 1 polyline→multi-rail mesh integration, bend/terminal tie와 bounded-search stress. 실제
   Pad/DUT landing을 사용한 84-connection acceptance는 아님.
 - Immutable Pad macro 등록/overlay와 recursive source-cell preservation. Legacy Phase 1 handoff는 아님.
-- Labeled DUT corpus coverage, invariant style, variation resolution, train/holdout score와 candidate
+- Labeled DUT corpus coverage, invariant style, variation resolution, train/logical-validation score와 candidate
   registry. Parameter dependency compiler나 actual transistor materialization 검증은 아님.
 - PCellizer occurrence/array inventory와 transform/snapshot determinism, non-array direct-box static-GDS
   batch. Reusable PCell이나 array-member/composite authoring 검증은 아님.
@@ -109,7 +109,7 @@ Ubuntu KLayout integration은 공식 package/checksum과 offscreen Qt를 사용�
 7. `workflow://` document status rehash, Windows-safe job id와 per-job append serialization.
 8. 공개 file/content-addressed directory writer의 local create-only publication과 same-target winner 보존.
 9. Phase 1 polyline의 multi-rail mesh composition과 router node/wall-time budget.
-10. Immutable Pad macro overlay, labeled DUT corpus/holdout score와 exact candidate registry.
+10. Immutable Pad macro overlay, labeled DUT corpus/logical-validation score와 exact candidate registry.
 
 남은 우선순위:
 

@@ -767,7 +767,7 @@ def test_pinned_technology_registry_snapshot_is_rechecked_before_plan(tmp_path):
             "topology": "example-nmos",
             "package_version": "1.0.0",
         },
-        "status": "candidate_scored_not_foundry_qualified",
+        "status": "candidate_scored_logical_validation_not_foundry_qualified",
     }
     registered = registry.register_package(package)
     snapshot = registry.snapshot()

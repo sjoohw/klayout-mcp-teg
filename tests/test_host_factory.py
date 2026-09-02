@@ -92,6 +92,28 @@ def test_host_doctor_separates_report_parser_from_execution_runner(tmp_path: Pat
     assert doctor["external_verification_runners"]["runner_ids_by_kind"]["drc"] == []
 
 
+def test_host_doctor_fails_when_no_workflow_engine_is_registered(tmp_path: Path) -> None:
+    host = build_host_components_from_config(
+        {
+            "schema_version": 1,
+            "paths": {
+                "workflow_root": str(tmp_path / "workflow"),
+                "output_root": str(tmp_path / "output"),
+            },
+            "security": {"allowed_component_ids": []},
+            "components": {},
+        },
+        installed_factories={},
+    )
+
+    doctor = host.doctor()
+
+    assert doctor["ok"] is False
+    assert "WORKFLOW_ENGINE_REGISTRY_EMPTY" in doctor["blockers"]
+    assert "PROCESS_CAPABILITY_PROVIDER_UNAVAILABLE" in doctor["blockers"]
+    assert "APPROVAL_VERIFIER_UNAVAILABLE" in doctor["blockers"]
+
+
 def test_host_factory_rejects_allowlisted_but_uninstalled_component(tmp_path: Path) -> None:
     config = {
         "schema_version": 1,

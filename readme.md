@@ -36,7 +36,7 @@ LLM orchestration 지침도 저장소에 함께 둔다. 범용 GDS/PCell 작업�
 | Reference style 추출 | 가능 | hierarchy/layer/직교성/치수 빈도 관측; rule·net·전기 특성 추론 없음 |
 | Direct-measurement Phase 1 | 제한된 nonproduction scaffold | Transistor adapter 없음, Pad 재합성; bounded polyline은 multi-rail mesh로 compile |
 | Pad macro onboarding | 지원 | Source cell을 immutable artifact로 등록하고 새 top에서 instance overlay; Phase 1과는 아직 미연결 |
-| Transistor corpus onboarding | 지원 | Labeled DUT coverage/style/variation/holdout score artifact; 신규 공정 PCell·foundry 승인은 아님 |
+| Transistor corpus onboarding | 지원 | Labeled DUT coverage/style/variation과 logical validation score; 원본 안에서 나눈 검증군이며 sealed 평가·신규 공정 PCell·foundry 승인은 아님 |
 | Persistent `teg_intake` | 제한 지원 | Stock은 bundled research-only Kelvin resistor profile/version에 한정; 임의 target은 host provider 필요 |
 | Persistent plan/generate/verify | Host 통합 필요 | Target-production verifier/provider/engine과 external runner/policy 필요 |
 | Foundry sign-off·PCM release | 불가 | 실제 PDK/deck/probe/scribe/조직 정책 필요 |
@@ -59,6 +59,8 @@ host-policy-selected external evidence 결속, durable generation staging과 job
 - Model harness는 single-scenario Gemini proxy tool-call trace smoke이며 exact Gemma4 qualification이 아니다.
 - 공개 file/content-addressed directory writer에는 지원 local filesystem의 create-only publish와 race
   회귀가 적용됐다. NFS/SMB/multi-host와 폐쇄망 RHEL deployment는 지원하지 않는다.
+- 저장소 최상위 project license가 아직 선택되지 않았다. `examples/external/nangate45/` 자산도 출처와
+  재배포 조건을 확인하기 전에는 release 자산으로 간주하지 않는다.
 
 이 항목은 [production 계약](docs/contracts-and-production.md)과
 [개발 우선순위](docs/development.md)에 상세히 기록한다.

@@ -38,7 +38,11 @@ from .evidence_state import evidence_ladder_contract
 from .errors import AnalysisError
 from .external_evidence import external_evidence_contract
 from .geometry import Box
-from .host_factory import HostComponents, build_host_components_from_toml
+from .host_factory import (
+    HostComponents,
+    build_host_components_from_toml,
+    load_deployment_toml,
+)
 from .klayout_adapter import create_layout_snapshot, run_klayout_worker
 from .kelvin_service import (
     compare_kelvin_layouts_service,
@@ -171,6 +175,34 @@ _TOOL_MODE_ALLOWLISTS: dict[str, frozenset[str] | None] = {
 
 
 def _default_workflow_roots() -> tuple[Path, Path]:
+    deployment_path = os.environ.get("KLAYOUT_MCP_DEPLOYMENT_TOML")
+    if deployment_path:
+        deployment = load_deployment_toml(deployment_path)
+        paths = deployment.get("paths", {})
+        workflow_root = paths.get("workflow_root")
+        output_root = paths.get("output_root")
+        if not isinstance(workflow_root, str) or not isinstance(output_root, str):
+            raise AnalysisError(
+                code="DEPLOYMENT_WORKFLOW_PATH_REQUIRED",
+                message="paths.workflow_root and paths.output_root are required.",
+                details={
+                    "field": "paths",
+                    "stage": "host_startup",
+                    "missing": [
+                        name
+                        for name, value in (
+                            ("workflow_root", workflow_root),
+                            ("output_root", output_root),
+                        )
+                        if not isinstance(value, str)
+                    ],
+                },
+                next_action=(
+                    "Configure host-controlled workflow and final output directories."
+                ),
+            )
+        return Path(workflow_root), Path(output_root)
+
     project_root = Path(__file__).resolve().parents[2]
     workflow_root = Path(
         os.environ.get(
@@ -649,7 +681,7 @@ def onboard_transistor_corpus(
     parameter_schema: dict[str, dict[str, Any]],
     dut_records: list[dict[str, Any]],
     layer_roles: dict[str, dict[str, int]],
-    sealed_holdout_dut_ids: list[str],
+    validation_dut_ids: list[str],
     expected_dbu_um: float | None = None,
     klayout_executable: str | None = None,
 ) -> McpToolResult:
@@ -664,7 +696,7 @@ def onboard_transistor_corpus(
             parameter_schema=parameter_schema,
             dut_records=dut_records,
             layer_roles=layer_roles,
-            sealed_holdout_dut_ids=sealed_holdout_dut_ids,
+            validation_dut_ids=validation_dut_ids,
             package_root=_onboarding_roots()["corpora"],
             expected_dbu_um=expected_dbu_um,
             klayout_executable=klayout_executable,
@@ -704,7 +736,7 @@ def score_transistor_adapter(
     compiler_identity: dict[str, Any],
     klayout_executable: str | None = None,
 ) -> McpToolResult:
-    """Score actual reproduced train/holdout cells without claiming foundry legality."""
+    """Score reproduced train/logical-validation cells without claiming sealed evaluation or foundry legality."""
 
     try:
         roots = _onboarding_roots()
