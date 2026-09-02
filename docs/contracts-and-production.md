@@ -185,6 +185,10 @@ intent_draft_complete
 - Approved probe-pad macro hash, top/under-metal/via/passivation stack과 keepout.
 - Probe technology, pitch/numbering, scrub/overtravel/touchdown와 pad damage limit.
 - Exact PDK/device PCell/model, DRC/LVS/PEX deck/runset와 invocation hash.
+- Adapter candidate의 필수 geometry metric/tolerance를 승인·취소하고 exact corpus/compiler에 receipt를
+  발행하는 host qualification-policy authority.
+- Registry writer/admin compromise까지 threat model에 포함하면 local registry root와 독립된
+  WORM/signed lifecycle ledger 또는 monotonic trust anchor.
 - Expected CDL/SPICE netlist, pin labels, device model mapping과 LVS tolerance.
 - PEX corner, route-R/terminal-C error budget, EM/current-density/thermal/density evidence.
 - Open/short/through/dummy structures와 de-embedding formula/order.

@@ -275,6 +275,9 @@ Upgrade checkpoint 진행:
   qualification/deprecation/revocation record를 구현하고 intake/privileged reverify에 package/snapshot pin을 결속했다.
 - [x] Lifecycle record에 package별 monotonic `sequence`와 `prev_record_sha256`를 넣고 재시작 시 hash chain으로
   복원한다. `recorded_at` 역전은 상태를 바꾸지 않으며 revoke 이후 동일 exact package의 상태 추가는 금지한다.
+- [x] Local head와 lifecycle chain을 함께 과거 상태로 되돌리는 writer/admin compromise는 같은 root만으로
+  탐지할 수 없음을 명시했다. Host가 별도 WORM/signed ledger 구현을 `lifecycle_trust_anchor`로 주입하면
+  append와 startup에서 exact package/sequence/record hash를 재검증하고 rollback 시 fail-closed한다.
 - [x] `ActionableIssue`/`ValidationReport`와 immutable draft revision, stale-revision conflict,
   content-bound resume token, no-write `validate_only`를 구현했다.
 - [x] External report parser와 별개인 host-only DRC/LVS/PEX runner registry를 추가했다. Runner는
@@ -388,6 +391,8 @@ example layout + DUT parameter manifest
 - 여러 DUT cell/instance가 포함된 source GDS/OAS와 exact top/cell/occurrence ID.
 - DUT별 parameter row. 최소 schema는 `gate_length`, `gate_pitch`, planar `width` 또는 FinFET `nfin`,
   `cell_height`와 선택 공정의 dummy/contact/finger/VT parameter를 포함한다.
+- Intended compiler가 실제로 사용하는 intercept, main effect, interaction, categorical indicator와
+  threshold/regime basis declaration. 선언과 corpus evidence는 exact hash로 결속한다.
 - Layer semantic role, G/D/S/B terminal mapping, cell/terminal normalization anchor와 topology regime.
 - 사용자 설명이 있으면 nominal/reference DUT, known legacy variation, 측정상 허용된 exception을 함께 받는다.
 - 사용자는 처음부터 완전한 manifest를 작성할 필요가 없다. `validate_only`가 layout inventory를 읽어
@@ -406,14 +411,16 @@ example layout + DUT parameter manifest
 4. 동일 source cell/geometry hash의 반복 instance는 기본적으로 한 evidence vote로 deduplicate한다.
    독립 evidence로 셀 경우 voting unit과 근거를 manifest에 명시한다.
 5. Parameter coverage matrix를 만들고 각 parameter의 distinct values, topology별 sample 수, 함께 변하는
-   parameter와 missing combination을 보고한다.
+   parameter와 missing combination을 보고한다. 합격 판정은 raw parameter 수나 one-factor-at-a-time 쌍이
+   아니라 compiler가 선언한 전체 basis의 design-matrix rank를 사용한다.
 6. Candidate fitting 전에 train/reference-candidate와 holdout DUT ID를 `CorpusPartitionManifest`로
    확정·hash한다. Holdout geometry/labels은 recipe/style extraction과 reference selection에서 읽을 수 없는
    sealed input으로 두고, split 이후의 교체나 leakage는 새 corpus/version으로만 처리한다.
-7. 두 parameter가 항상 함께 변하거나 한 값만 있어 effect를 분리할 수 없으면 추론하지 않는다.
-   `DUT_CORPUS_IDENTIFIABILITY_INSUFFICIENT`와 reason=`confounded_parameter_effect`, 원인 column/DUT ID,
-   필요한 추가 split DUT 조합을 반환한다. 동일 parameter row가 서로 다른 geometry를 가지는 경우도
-   reason=`same_row_geometry_diverged`로 같은 gate에서 중단한다.
+7. 선언된 main/interaction/categorical/regime basis가 full rank가 아니면 추론하지 않는다.
+   `DUT_COMPILER_BASIS_NOT_IDENTIFIABLE`에 실제 rank, 필요한 basis term 수와 추가 DUT가 필요한 이유를
+   반환한다. L과 CPP의 개별 축만으로 `L×CPP`를 식별했다고 주장하지 않으며, full-rank 일반 DOE를
+   one-factor-at-a-time 쌍이 없다는 이유만으로 차단하지 않는다. 동일 parameter row가 서로 다른
+   geometry를 가지는 경우는 별도 사용자 reference 선택 gate로 보낸다.
 8. Terminal/layer/parameter row가 빠졌거나 같은 DUT ID에 값이 충돌하면 각각
    `TERMINAL_MAPPING_MISSING`, `DUT_PARAMETER_MANIFEST_INCOMPLETE`, `DUT_PARAMETER_CONFLICT`로 중단한다.
 9. Planar/FinFET, contact topology 또는 cell-height regime가 바뀌는 branch는 별도 corpus scope로 나누고
@@ -530,15 +537,19 @@ example layout + DUT parameter manifest
    결속한다. 같은 hash 집합은 deterministic result를 내고 어느 하나라도 바뀌면 새 scorecard를 만든다.
    실패 시 code와 함께 failing DUT/layer/group, measured/threshold, diff handle, 원인과 다음 correction을
    공통 `ValidationReport`로 보여준다.
-7. Package lifecycle은 `candidate → reviewed → geometry_validated → foundry_validated → deprecated/revoked`로
+7. MCP 호출자가 전달한 scoring policy는 diagnostic score에만 사용한다. Candidate qualification은
+   allowlisted host `qualification_policy_authority`가 발행한 policy ID/version/hash, required metric,
+   승인자와 exact corpus/compiler receipt만 사용한다. Required metric 실패는 평균/threshold로 상쇄하지
+   않고, candidate build 시 authority가 revocation을 포함해 receipt를 다시 검증한다.
+8. Package lifecycle은 `candidate → reviewed → geometry_validated → foundry_validated → deprecated/revoked`로
    관리한다. Package bytes는 불변이고 상태·revocation·qualification 변화는 새 registry snapshot의 signed
    record다. `geometry_validated`는 이 절의 내부 재현 gate, `foundry_validated`는 M5의 exact DRC pilot
    receipt까지 결속된 경우에만 사용한다.
-8. 새 job은 technology/PDK/device/topology/parameter-domain compatibility가 exact한 active package를 먼저
+9. 새 job은 technology/PDK/device/topology/parameter-domain compatibility가 exact한 active package를 먼저
    조회한다. 하나뿐이면 version/status/scorecard/domain과 선택 이유를 보여주고 재사용하며, 여러 개면
    차이를 나열해 explicit version을 선택하게 한다. 0개, stale/revoked entry 또는 domain 밖 target이면
    어느 field가 다른지와 추가 onboarding에 필요한 DUT 조합을 알려준다.
-9. Registry cache는 검증 우회가 아니다. 재사용 package도 매 job에서 input/domain/hash를 preflight하고
+10. Registry cache는 검증 우회가 아니다. 재사용 package도 매 job에서 input/domain/hash를 preflight하고
    생성 결과를 fresh reload해 같은 scoring policy의 required dimensions와 terminal/connectivity를 다시
    검사한다.
 
@@ -547,9 +558,10 @@ Upgrade checkpoint 진행:
 - [x] 여러 labeled DUT cell과 parameter row, semantic layer/terminal mapping, logical validation partition을
   받는 corpus artifact와 coverage/identifiability gate를 구현했다. 같은 source에 geometry가 보이므로
   sealed holdout이라고 주장하지 않는다.
-- [x] Identifiability blocker를 corpus schema v2에 영구 결속하고, normalized design-matrix rank와
-  parameter별 conditional-variation witness를 검사한다. Blocker가 하나라도 있거나 구 schema에 해당
-  evidence가 없으면 score/candidate 단계가 fail-closed한다.
+- [x] Identifiability blocker를 corpus schema v3에 영구 결속하고 compiler-declared
+  main/interaction/category/threshold-regime basis의 normalized design-matrix rank를 검사한다.
+  Conditional-variation witness는 설명용이며 hard gate가 아니다. Blocker가 하나라도 있거나 exact
+  model-spec hash evidence가 없으면 score/candidate 단계가 fail-closed한다.
 - [x] Observed invariant style metric과 same-parameter/different-geometry ambiguity를 검출하고, 사용자가
   따를 DUT/policy를 immutable resolution manifest로 선택하도록 했다.
 - [x] Reproduced GDS를 실제로 다시 읽어 train/validation을 분리 scoring한다. 원본 stream replay는
@@ -563,6 +575,9 @@ Upgrade checkpoint 진행:
   layer role과 per-DUT topology를 선언 schema에 맞게 fail-closed 검증한다.
 - [x] `exact_fingerprint_required`는 aggregate threshold와 무관한 per-DUT hard gate이며, reproduced
   stream과 corpus의 DBU exact equality를 scoring 전 hard gate로 검사한다.
+- [x] Caller-selected score policy는 diagnostic-only로 분리했다. Candidate용 score는 host가 주입한
+  trusted qualification-policy authority, 승인자/receipt와 required metric hard fail을 요구하고,
+  candidate build 시 exact policy/corpus/compiler binding과 current non-revoked receipt를 재검증한다.
 - [ ] Corpus로부터 CPP 연계 Poly/Active/contact/implant/terminal dependency recipe를 자동 합성하는
   process-specific compiler는 만들지 않았다. 실제 labeled corpus, topology 규칙과 foundry 검증 없이는
   한 GDS에서 이를 추론하지 않으며 candidate score를 PCell/electrical/foundry 동등성으로 승격하지 않는다.
@@ -846,7 +861,7 @@ landing acceptance는 M2와 `geometry_validated` package가 준비된 뒤 완료
 | 21-site DOE, terminal/net/pad, bias, inactive shared-pad policy | device/test owner | M4b corpus 및 M5 전 |
 | Existing mesh compiler가 소비하는 rail width/space, rail/cross-tie pitch, minimum rail count와 segment corridor policy | PDK/layout owner | M4a/M4b 전 |
 | DRC/LVS/PEX executable, license, deck/runset/corner와 report semantics | CAD/foundry owner | M5 전 |
-| approval backend, adapter-registry storage/signing/revocation policy, signoff policy와 release authority | 조직 workflow owner | M1/M3e/M5 전 |
+| approval backend, host qualification-policy authority, adapter-registry storage/signing/revocation policy, 독립 WORM/signed lifecycle anchor, signoff policy와 release authority | 조직 workflow owner | M1/M3e/M5 전 |
 | exact RHEL image와 Gemma4 runtime | IT/model owner | M6 전 |
 
 자료가 없으면 합성값으로 채우지 않는다. 해당 adapter/profile은 `unavailable`로 남기고 정확한 blocker를
@@ -879,11 +894,14 @@ acceptance에 포함한다.
 - [ ] 모든 known-invalid public input은 exact field/object/value/expected/reason/fix 또는 필요한 질문,
   no-write 상태와 resume action을 반환하며 generic `invalid input`/raw traceback이 없다.
 - [ ] Source PAD40 cell subtree가 수정 없이 instance로 배치되고 recursive fingerprint, ID/transform/numbering과 지정 access-metal edge landing이 일치한다.
-- [ ] L/gate-pitch/W 또는 nFin/cell-height 정보를 가진 example DUT corpus가 identifiability gate를 통과하고, parameter dependency와 scoped Drawing Style이 supporting DUT/coverage와 함께 추출된다.
+- [ ] L/gate-pitch/W 또는 nFin/cell-height 정보를 가진 example DUT corpus가 intended compiler의
+  main/interaction/category/regime basis identifiability gate를 통과하고, parameter dependency와 scoped
+  Drawing Style이 supporting DUT/coverage와 함께 추출된다.
 - [ ] 의도되지 않았거나 legacy로 유지된 DUT별 variation은 자동 평균화되지 않고 특정 reference DUT/majority/topology exception/explicit rule 중 사용자 승인 resolution을 가진다.
 - [ ] 실제 transistor adapter가 승인된 corpus resolution으로 21-row DOE와 holdout DUT를 재생성하고 dependent geometry, Drawing Style, selected variation policy와 G/D/S/B terminal stack을 검증한다.
 - [ ] Fitting 전에 sealed holdout이 고정되고 reference reproduction/approved style/holdout 다차원 scorecard가
-  required hard gate와 evidence coverage를 통과하며 단일 평균점수로 실패를 숨기지 않는다.
+  host-approved policy/승인자/receipt와 required-metric hard gate를 통과하며 단일 평균점수나 caller가
+  낮춘 threshold로 실패를 숨기지 않는다.
 - [ ] Exact tech/PDK/device/topology/domain의 immutable adapter package가 registry에 version/hash로 저장되어
   다음 job에서 onboarding 없이 재사용되고, drift/ambiguity/revocation은 mutation 전에 설명된다.
 - [ ] Current router의 84 connection이 bounded search로 끝나고 모든 polyline segment가 bend/landing을 포함한 실제 hole-bearing mesh로 compile된다.

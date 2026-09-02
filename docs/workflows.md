@@ -15,8 +15,9 @@
 | Kelvin reference 재현 | Kelvin 전용 plan/generate/compare | 지원 | 6-split nonproduction GDS |
 | Non-array occurrence의 direct box 한 축을 resize한 static split GDS 생성 | PCellizer workflow | 제한 지원 | one parameter, row별 standalone GDS; reusable PCell 아님 |
 | 실제 Pad macro 등록·보존 배치 | `register_pad_macro` → `compose_registered_pad_macro` | 지원 | Source Pad subtree를 수정하지 않는 overlay GDS |
-| Labeled transistor corpus 등록·검토 | `onboard_transistor_corpus` → `resolve_transistor_corpus` | 지원 | Coverage, invariant style, ambiguity와 human resolution artifact |
-| 재현 DUT score·candidate 저장 | `score_transistor_adapter` → build/register candidate | 제한 지원 | Train/logical-validation score와 exact registry entry; callable transistor compiler 아님 |
+| Labeled transistor corpus 등록·검토 | `onboard_transistor_corpus` → `resolve_transistor_corpus` | 지원 | Compiler-declared basis coverage, invariant style, ambiguity와 human resolution artifact |
+| 재현 DUT 진단 score | `score_transistor_adapter` | 지원 | 호출자 policy 결과는 비교·진단 전용이며 candidate 자격 없음 |
+| Host 승인 score·candidate 저장 | host policy authority → score → build/register candidate | 제한 지원 | 승인자/policy/hash/필수 metric 결속; callable transistor compiler나 foundry 승인은 아님 |
 | Node별 reference 관리 | Reference Library workflow | 지원 | immutable reference selection |
 | Persistent job | `teg_intake` | 제한 지원 | Stock은 bundled research-only Kelvin resistor profile/version만 지원 |
 | Persistent plan/generate/verify | 4-call facade | host 통합 필요 | resumable evidence chain |
@@ -224,16 +225,26 @@ fitting 계산에서 제외하지만 같은 source GDS와 metadata에 남는다.
 `kind=integer` 값은 실제 정수여야 한다. 각 terminal은 존재하는 semantic `layer_role`을 명시하고,
 각 DUT의 topology는 corpus topology와 정확히 같아야 한다.
 
-각 parameter에 값이 두 개 이상 있다는 것만으로 충분하지 않다. Training DOE의 normalized design-matrix
-rank가 parameter 수와 같아야 하고, 각 parameter는 다른 parameter를 같은 값으로 둔 비교 DUT가 있어야
-한다. 부족한 경우 issue와 witness가 `identifiability_evidence`에 영구 저장되며 score와 candidate 생성은
+`compiler_model_spec`에는 실제 compiler가 사용하는 basis를 명시한다. 지원 항목은 intercept,
+parameter main effect, 여러 parameter interaction, 숫자 category indicator와 threshold-based regime다.
+Training DUT로 만든 그 basis matrix가 full rank인지 검사한다. 따라서 L과 CPP의 각 축 예제가 있어도
+`L×CPP` 항이 식별되지 않으면 차단하고, 반대로 일반 DOE가 full rank라면 one-factor-at-a-time 쌍이
+없다는 이유만으로 차단하지 않는다. Conditional-variation 쌍은 이해를 돕는 정보일 뿐 합격 조건이
+아니다. 부족한 basis와 rank는 `identifiability_evidence`에 영구 저장되며 score와 candidate 생성은
 `DUT_CORPUS_IDENTIFIABILITY_BLOCKED`로 중단된다.
 
 같은 parameter row인데 geometry가 다르면 `onboard_transistor_corpus`는 어느 reference DUT를 따를지
 묻는다. 사용자의 결정은 immutable resolution artifact에 기록된다. 관측된 invariant metric은
 drawing-style 후보이며 공정 규칙으로 승격되지 않는다.
 
-Score는 reproduced train/validation cell을 실제로 다시 읽어 비교한다. 원본 corpus GDS 자체를
+Score는 reproduced train/validation cell을 실제로 다시 읽어 비교한다. MCP 호출자가 전달하는
+`scoring_policy`는 진단용이다. Stock처럼 host `qualification_policy_authority`가 없으면 scorecard를
+만들 수는 있지만 adapter candidate에는 사용할 수 없다. Candidate용 score는 host authority가 발행한
+policy ID/version/hash, 승인자, corpus/compiler binding과 non-revoked receipt를 저장하며, 지정된 필수
+metric 하나라도 tolerance를 벗어나면 평균점수와 무관하게 실패한다. Candidate build 시 authority가
+같은 receipt를 다시 확인한다.
+
+원본 corpus GDS 자체를
 reproduced output으로 제출하면 candidate evidence로 인정하지 않는다. 원본과 SHA가 다른 결과는
 `distinct_stream_logical_validation_no_execution_receipt`로만 표시한다. Resolution/scorecard/candidate를
 소비할 때 directory hash, schema/type, partition, unresolved blocker, compiler code hash와
@@ -244,6 +255,26 @@ Contact/implant/terminal dependency recipe를 자동 합성하거나 callable tr
 
 `exact_fingerprint_required=true`이면 fingerprint 불일치는 score threshold가 0이어도 per-DUT hard-fail이다.
 Reproduced GDS DBU도 corpus DBU와 도형 비교 전에 정확히 같아야 하며, 다르면 scorecard를 만들지 않는다.
+
+Technology lifecycle의 local head는 마지막 파일 하나가 빠지는 실수를 잡는다. 같은 registry root의
+record와 head를 함께 과거 상태로 바꿀 수 있는 관리자 침해도 막아야 하는 배포는 별도 WORM 또는 signed
+ledger adapter를 `lifecycle_trust_anchor`로 설정해야 한다. 외부 anchor가 설정되면 append와 startup에서
+현재 package sequence/hash를 확인하며, 불일치나 anchor 부재 시 registry가 시작되지 않는다.
+
+조직 구현을 설치한 host의 `deployment.toml`은 두 stable component ID를 allowlist하고 선택한다.
+아래 ID는 형식 예시일 뿐 stock에 포함된 구현 이름이 아니다.
+
+```toml
+[security]
+allowed_component_ids = ["org-qualification-v1", "org-lifecycle-ledger-v1"]
+
+[components]
+qualification_policy_authority = "org-qualification-v1"
+lifecycle_trust_anchor = "org-lifecycle-ledger-v1"
+```
+
+`host_doctor`는 qualification authority가 구성·trusted인지, technology registry가 external anchor로
+rollback을 검사하는지 따로 표시한다.
 
 ## PCellizer
 

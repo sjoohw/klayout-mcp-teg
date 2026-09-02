@@ -4,7 +4,7 @@
 [contracts-and-production.md](contracts-and-production.md), 구현 계획은
 [upgrade_plan.md](../upgrade_plan.md)에서 별도로 관리한다.
 
-현재 코드 구현 기준선은 commit `dbd25060dc35e48e8d1cc55dd9bf313d8bac3d77`이다. 이후 이 검증 결과를
+현재 코드 구현 기준선은 commit `eb02520b53c95c200ccc6d42413a9d19767ac1bb`이다. 이후 이 검증 결과를
 기록하는 문서 전용 commit은 코드 동작을 바꾸지 않는다. 과거 review 기준선과 중간 upgrade SHA는
 validation 표에만 남긴다.
 등록된 tool, schema 또는 planning contract가 있다는 사실은 target-process readiness를 뜻하지 않는다.
@@ -28,8 +28,8 @@ transistor generator와 foundry DRC에 연결한 stock E2E는 없다.
 | PCellizer | Authoring-supported non-array occurrence의 direct box 한 축과 parameter key 하나를 resize해 row별 standalone GDS를 만든다. | Reusable KLayout PCell이나 Poly/Active/contact/implant/pin을 함께 움직이는 W×L composite transistor generator가 아니다. |
 | Persistent facade | Stock intake는 bundled research-only Kelvin resistor profile/version에 한정되고 `teg_plan`은 approval 검증에서 planning 전에 fail-closed한다. | 실패는 승인 우회가 아니라 의도된 trust boundary다. 임의 target profile이나 일반 MCP 설정만으로 production E2E가 된다는 뜻도 아니다. |
 | Model evaluation | 기본 live model은 `gemini-3.5-flash-medium`이고 한 실행은 scenario 하나의 MCP tool-call trace smoke다. 결과는 `qualification_claim=none`, `proxy_equivalence_claimed=false`다. | Completed tool result, final-answer semantics, non-MCP write와 permission enforcement를 아직 채점하지 않으므로 exact Gemma4 reliability/write-safety 검증으로 인용하면 안 된다. |
-| Pad/corpus onboarding | Pad artifact와 corpus/resolution/scorecard/candidate는 소비 직전에 schema와 content address를 다시 검사한다. Integer/terminal/topology뿐 아니라 DOE rank·conditional variation blocker를 corpus에 저장하며 exact fingerprint/DBU는 threshold 독립 hard gate다. | 다른 file SHA는 `distinct_stream`일 뿐 compiler 실행 증거가 아니다. 검증 DUT도 같은 source에 보여서 비밀 holdout이 아니며 similarity는 PCell·전기·foundry 동등성이 아니다. |
-| Persistent host state | Technology lifecycle은 package별 `sequence + prev_record_sha256` chain과 별도 final sequence/hash head를 다시 읽고 revoke를 terminal state로 처리한다. 마지막 record/head가 없으면 시작을 막는다. Deployment TOML root를 status/onboarding도 사용하며 engine 0개 doctor는 실패한다. | `recorded_at`은 표시용 provenance이고 lifecycle 순서를 바꾸지 않는다. Trusted-head storage 자체의 접근 통제가 필요하며 storage integrity가 실제 engine·compiler·approval backend를 대신하지 않는다. |
+| Pad/corpus onboarding | Pad artifact와 corpus/resolution/scorecard/candidate는 소비 직전에 schema와 content address를 다시 검사한다. Integer/terminal/topology와 compiler-declared main/interaction/category/regime basis의 full-rank 여부를 corpus에 저장한다. Caller policy score는 진단 전용이고 candidate에는 host-approved policy·승인자·필수 metric hard gate가 필요하다. | 다른 file SHA는 `distinct_stream`일 뿐 compiler 실행 증거가 아니다. 검증 DUT도 같은 source에 보여서 비밀 holdout이 아니며 similarity는 PCell·전기·foundry 동등성이 아니다. Stock에는 qualification-policy authority가 없어 candidate scoring은 fail-closed한다. |
+| Persistent host state | Technology lifecycle은 package별 `sequence + prev_record_sha256` chain과 final sequence/hash head를 다시 읽고 revoke를 terminal state로 처리한다. Local record/head rollback도 탐지해야 하면 host가 별도 `lifecycle_trust_anchor`를 연결하고 startup에 재검증한다. Deployment TOML root를 status/onboarding도 사용하며 engine 0개 doctor는 실패한다. | `recorded_at`은 표시용 provenance다. Stock local head는 record와 head를 함께 되돌릴 수 있는 writer/admin compromise를 탐지하지 않으며, 외부 WORM/signed ledger가 구성됐다고 주장하지 않는다. |
 | Output publication | 공개 writer inventory에 create-only file/directory publish와 same-target race 회귀를 적용했다. | NTFS/ext4/XFS local contract이며 NFS/SMB/multi-host는 fail-closed한다. |
 | External runner | Host-only runner registry, executable/license/deck/runset preflight, timeout/resource declaration과 report provenance binding 계약이 있다. | Stock runner나 foundry deck/license는 없고 runner output 자체는 signoff가 아니다. |
 | Linux/csh launcher | Source-checkout helper다. | 현재 폐쇄망 RHEL 배포 bundle이나 KLayout/PDK readiness doctor가 아니다. |
@@ -49,14 +49,14 @@ transistor generator와 foundry DRC에 연결한 stock E2E는 없다.
 Gemma4 또는 다른 제한 모델의 성공률 검증이 아니다.
 
 이 경계 metadata를 반영한 HEAD 재계측은 다음과 같다. 전체 record는 compact, sorted-key
-JSON의 serialized `tools/list` 길이이며 `inputSchema` 길이와 구분한다.
+JSON의 serialized `tools/list` 길이다.
 
-| Mode | Tools | 전체 `tools/list` chars | `inputSchema` chars |
-|---|---:|---:|---:|
-| `expert` | 64 | 122,686 | 78,703 |
-| `facade` | 7 | 21,919 | compact MeasurementManifest object 포함 |
-| `drawing` | 7 | 13,136 | 8,021 |
-| `onboarding` | 9 | 10,687 | 4,713 |
+| Mode | Tools | 전체 `tools/list` chars |
+|---|---:|---:|
+| `expert` | 64 | 115,533 |
+| `facade` | 7 | 21,919 |
+| `drawing` | 7 | 13,136 |
+| `onboarding` | 9 | 10,827 |
 
 Mode 공통 server instruction은 8,017자다. `drawing`, `facade`, `onboarding`은 tool 10개 이하,
 `tools/list + instruction` 30,000자 이하를 CI에서 검사한다. Tool 수나 문자 수 자체는 usability 또는 model
@@ -123,10 +123,11 @@ Pad macro/DUT adapter와 full-PDK DRC/PEX를 연결하지 않았으므로 이를
 | Review hardening | `c4d456481a214cf380e91e507aed92c1f77e03f8` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `708 passed, 1 warning`; [Actions run 33626068843](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33626068843) 전체 green | Windows/Ubuntu 3.11·3.13, wheel, csh, KLayout 0.30.10 통합 통과 |
 | Evidence hardening | code `afd90cd7dbdfdac4ca4d76bee8a5a6ee583fde80`, docs `084a6c116f4021317f90c3a2dd26e28892e157c0` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `715 passed, 1 warning`; [Actions run 33637295915](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33637295915) 전체 green | Lifecycle chain/content-address/schema와 Windows/Ubuntu/KLayout 통합 회귀 통과 |
 | Qualification-gate hardening | code `dbd25060dc35e48e8d1cc55dd9bf313d8bac3d77`, docs `21a4b28cdd58122700ee80adca45e692b28400bf` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `719 passed, 1 warning`; [Actions run 33643053110](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33643053110) 전체 green | Lifecycle trusted head, exact fingerprint/DBU hard gate와 persisted DOE identifiability를 Windows/Ubuntu/KLayout에서 통과 |
+| Policy/model/anchor hardening | code `eb02520b53c95c200ccc6d42413a9d19767ac1bb` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `722 passed, 1 warning`; remote CI 확인 전 | Host-owned candidate policy, compiler-declared basis rank와 optional external lifecycle anchor 회귀 통과 |
 
 Local pass와 remote CI green은 별도 조건이다. Review-hardening과 evidence-hardening code set은
 두 조건을 모두 통과했다. Qualification-gate hardening도 동일 code/docs snapshot의 remote CI까지
-통과했다.
+통과했다. 최신 policy/model/anchor hardening은 아래 문서 commit을 push한 뒤 동일 remote CI를 확인한다.
 이는 repository regression 기준선이며 실제 target transistor/foundry qualification을 뜻하지 않는다.
 
 `feedback.md`와 `answer.md`는 각 검토 시점의 historical record다. 현재 상태의 권위 있는 요약은

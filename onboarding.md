@@ -216,11 +216,34 @@ onboard_transistor_corpus
 
 `parameter_schema`에는 Gate length, CPP, planar width, nFin, cell height와 필요한 추가 축을 이름/단위/
 numeric kind로 등록한다. 각 `dut_record`는 exact cell name, 모든 parameter 값, topology와 terminal
-landing/layer mapping을 가져야 한다. 최소 한 DUT는 fitting 전에 sealed holdout으로 분리한다.
+landing/layer mapping을 가져야 한다. `compiler_model_spec`에는 intended compiler의 main effect,
+interaction, 숫자 category와 threshold/regime basis를 명시한다. 최소 한 DUT는 validation group으로
+분리하지만 같은 source에 보이므로 현재 구현을 sealed holdout이라고 부르지 않는다.
+
+예를 들어 L, CPP, 두 값의 조합과 nFin 4 이상에서 바뀌는 branch를 쓰는 compiler는 다음처럼 적는다.
+
+```json
+{
+  "schema_version": 1,
+  "basis_terms": [
+    {"term_id": "constant", "kind": "intercept"},
+    {"term_id": "L", "kind": "main_effect", "parameter": "gate_length_nm"},
+    {"term_id": "CPP", "kind": "main_effect", "parameter": "cpp_nm"},
+    {"term_id": "L*CPP", "kind": "interaction", "parameters": ["gate_length_nm", "cpp_nm"]},
+    {"term_id": "nFin>=4", "kind": "threshold_indicator", "parameter": "nfin", "operator": ">=", "value": 4}
+  ]
+}
+```
+
+누락되거나 지원되지 않는 term이면 error가 정확한 `basis_terms[index]`, 받은 값, 허용 형식과 수정법을
+반환한다. Full-rank가 아니면 실제 rank와 필요한 term 수를 반환한다.
 
 Corpus onboarding은 observed invariant style과 same-parameter/different-geometry variation을 찾는다.
 설명되지 않은 차이는 사용자가 따를 reference DUT를 선택하기 전까지 clarification 상태로 남긴다.
-Reproduced GDS score가 통과해도 candidate 상태는 `candidate_scored_not_foundry_qualified`다.
+Reproduced GDS의 caller-selected score는 진단용이다. Candidate를 만들려면 host에 조직이 관리하는
+`qualification_policy_authority`가 설치돼야 하며, 그 authority가 고정한 필수 metric은 평균점수와
+무관한 hard fail이다. Policy ID/version/hash, 승인자와 non-revoked receipt를 candidate build 시 다시
+검증한다. 통과해도 candidate 상태는 `candidate_scored_logical_validation_not_foundry_qualified`다.
 
 현재 경로는 CPP가 바뀔 때 Gate/Active/Contact/implant/terminal을 함께 움직이는 dependency recipe나
 callable PCell을 자동 생성하지 않는다. 실제 compiler identity/code hash는 candidate에 결속되지만,

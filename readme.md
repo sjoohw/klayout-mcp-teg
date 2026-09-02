@@ -36,7 +36,7 @@ LLM orchestration 지침도 저장소에 함께 둔다. 범용 GDS/PCell 작업�
 | Reference style 추출 | 가능 | hierarchy/layer/직교성/치수 빈도 관측; rule·net·전기 특성 추론 없음 |
 | Direct-measurement Phase 1 | 제한된 nonproduction scaffold | Transistor adapter 없음, Pad 재합성; bounded polyline은 multi-rail mesh로 compile |
 | Pad macro onboarding | 지원 | Source cell을 immutable artifact로 등록하고 새 top에서 instance overlay; Phase 1과는 아직 미연결 |
-| Transistor corpus onboarding | 지원 | Integer/terminal/topology, DOE rank·독립 variation을 검사하고 blocker를 corpus에 결속; exact fingerprint/DBU hard gate와 content-addressed evidence 사용; 실행 receipt·sealed 평가·신규 공정 PCell·foundry 승인은 아님 |
+| Transistor corpus onboarding | 지원 | Compiler가 선언한 main/interaction/discrete-regime basis의 DOE rank를 검사하고 blocker를 corpus에 결속; caller score는 진단 전용이며 host 승인 policy의 필수 metric만 candidate gate에 사용; 실행 receipt·sealed 평가·신규 공정 PCell·foundry 승인은 아님 |
 | Persistent `teg_intake` | 제한 지원 | Stock은 bundled research-only Kelvin resistor profile/version에 한정; 임의 target은 host provider 필요 |
 | Persistent plan/generate/verify | Host 통합 필요 | Target-production verifier/provider/engine과 external runner/policy 필요 |
 | Foundry sign-off·PCM release | 불가 | 실제 PDK/deck/probe/scribe/조직 정책 필요 |
@@ -45,9 +45,11 @@ LLM orchestration 지침도 저장소에 함께 둔다. 범용 GDS/PCell 작업�
 DesignIntent↔MeasurementManifest actual source/program/compliance/timing/safety 결속,
 host-policy-selected external evidence 결속, durable generation staging과 job별 append 직렬화가 구현됐다.
 `signoff_evidence_approved`는 layout evidence 승인일 뿐이며 `production_ready`를 true로 만들지 않는다.
-Technology adapter lifecycle은 package별 단조 sequence와 이전 record hash를 사용한다. 별도 trusted
-head가 마지막 sequence/hash를 고정하므로 마지막 revoke 파일이나 head가 사라지면 재시작 자체가
-fail-closed한다. `recorded_at`은 정렬 기준이 아니며 revoke는 해당 exact package의 terminal state다.
+Technology adapter lifecycle은 package별 단조 sequence와 이전 record hash를 사용한다. Local head가
+마지막 sequence/hash를 고정하므로 실수로 마지막 revoke 파일 또는 head 하나만 지우면 재시작이
+fail-closed한다. 같은 저장소의 record와 head를 함께 되돌릴 수 있는 관리자 침해까지 탐지하려면
+host가 별도 WORM/signed ledger 구현인 `lifecycle_trust_anchor`를 연결해야 한다. Stock에는 이 외부
+anchor가 없으며 그 보호를 주장하지 않는다. `recorded_at`은 정렬 기준이 아니고 revoke는 terminal state다.
 
 현재 가장 중요한 미비사항:
 
@@ -57,6 +59,9 @@ fail-closed한다. `recorded_at`은 정렬 기준이 아니며 revoke는 해당 
   여전히 실제 Pad macro 대신 synthetic Pad 위치를 사용한다.
 - Host-controlled external runner/preflight 계약은 구현됐지만 stock host에는 실제 runner, deck,
   license 또는 signoff policy가 설정되지 않는다.
+- Stock host에는 adapter candidate용 `qualification_policy_authority`와 lifecycle용 외부
+  `lifecycle_trust_anchor`가 없다. 호출자가 정한 느슨한 score는 진단에는 쓸 수 있지만 candidate를
+  만들 수 없고, local lifecycle 저장소 전체를 되돌릴 수 있는 관리자 침해는 탐지한다고 주장하지 않는다.
 - 실제 stdio `teg_*`와 host-injected verifier/engine을 함께 재시작하는 E2E가 없다.
 - Actual foundry scribe/probe/de-embedding/tester/PCM 계약과 adapter가 없다.
 - Model harness는 single-scenario Gemini proxy tool-call trace smoke이며 exact Gemma4 qualification이 아니다.
@@ -165,8 +170,8 @@ production readiness가 아니며, 처음 사용하는 host 예제는 의도적�
 | Kelvin reference 재현 | `plan_kelvin_m1_routing` |
 | Existing GDS parameterization | `inventory_pcellizer_hierarchy` |
 | 실제 Pad macro 등록·보존 배치 | `register_pad_macro` → `compose_registered_pad_macro` |
-| Labeled DUT corpus 등록·차이 해결·score | `onboard_transistor_corpus` → `resolve_transistor_corpus` → `score_transistor_adapter` |
-| Scored adapter 후보 저장 | `build_transistor_adapter_candidate` → `register_transistor_adapter_candidate` |
+| Labeled DUT corpus 등록·차이 해결·진단 score | `onboard_transistor_corpus` → `resolve_transistor_corpus` → `score_transistor_adapter` |
+| Host 승인 score로 adapter 후보 저장 | host `qualification_policy_authority` 설정 → `score_transistor_adapter` → `build_transistor_adapter_candidate` → `register_transistor_adapter_candidate` |
 | Process-node reference 등록 | `register_reference_layout` |
 | Resumable host job | `teg_intake` |
 

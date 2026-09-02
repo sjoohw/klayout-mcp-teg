@@ -18,6 +18,7 @@ src/klayout_mcp/
 ├─ phase1_*.py               R/MOM scaffold와 transistor-adapter blocker; synthetic Pad/mesh-route composition
 ├─ pad_macro.py              immutable Pad macro artifact와 overlay composition
 ├─ dut_corpus.py             labeled DUT coverage/variation/logical-validation scoring
+├─ qualification_policy.py   host-owned candidate scoring policy와 approval receipt gate
 ├─ technology_registry.py    exact candidate package registry
 ├─ file_publication.py       local create-only file/directory publication
 ├─ host_factory.py           host component 조립과 preflight
@@ -56,10 +57,11 @@ Historical baseline, not release evidence:
 | same-SHA remote CI | [Actions run 33589034379](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33589034379): pytest 5 jobs failed, csh smoke only passed |
 | release verdict | red; local pass count를 current-main 또는 cross-platform 검증으로 사용하지 않음 |
 
-Upgrade commit `7a7348268c8af2593e59d2a1c6d434b32c0fb087`의 같은 로컬 환경 진단은
+Historical upgrade commit `7a7348268c8af2593e59d2a1c6d434b32c0fb087`의 같은 로컬 환경 진단은
 `702 passed, 1 warning`이다. 같은 SHA의 [Actions run 33617837011](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33617837011)은
 Windows 3.11/3.13, wheel smoke와 csh launcher가 통과했지만 Ubuntu 3.11/3.13과 KLayout integration이
-OS별 안내문 테스트 한 건으로 실패했다. 따라서 현재 release verdict도 red다.
+OS별 안내문 테스트 한 건으로 실패했다. 이후 해당 문제는 수정됐고 현재 상태는
+[current-capability-boundaries.md](current-capability-boundaries.md)의 최신 exact-SHA 표를 기준으로 한다.
 
 Pass count를 README와 여러 문서에 복사하지 않는다. Release evidence는 exact SHA, clean/dirty state,
 lock provenance, OS/Python/KLayout, pass/skip/warning과 Actions URL을 가진 generated artifact로만
@@ -75,8 +77,9 @@ lock provenance, OS/Python/KLayout, pass/skip/warning과 Actions URL을 가진 g
 - Phase 1 polyline→multi-rail mesh integration, bend/terminal tie와 bounded-search stress. 실제
   Pad/DUT landing을 사용한 84-connection acceptance는 아님.
 - Immutable Pad macro 등록/overlay와 recursive source-cell preservation. Legacy Phase 1 handoff는 아님.
-- Labeled DUT corpus coverage, invariant style, variation resolution, train/logical-validation score와 candidate
-  registry. Parameter dependency compiler나 actual transistor materialization 검증은 아님.
+- Labeled DUT corpus coverage, invariant style, variation resolution, compiler-declared basis rank,
+  train/logical-validation score와 host-owned candidate policy registry. Parameter dependency compiler나 actual
+  transistor materialization 검증은 아님.
 - PCellizer occurrence/array inventory와 transform/snapshot determinism, non-array direct-box static-GDS
   batch. Reusable PCell이나 array-member/composite authoring 검증은 아님.
 - Reference library selection/precedent contract.
@@ -110,14 +113,17 @@ Ubuntu KLayout integration은 공식 package/checksum과 offscreen Qt를 사용�
 8. 공개 file/content-addressed directory writer의 local create-only publication과 same-target winner 보존.
 9. Phase 1 polyline의 multi-rail mesh composition과 router node/wall-time budget.
 10. Immutable Pad macro overlay, labeled DUT corpus/logical-validation score와 exact candidate registry.
+11. Caller diagnostic policy와 host-approved candidate policy 분리, required-metric hard fail과 approval receipt 재검증.
+12. Compiler-declared main/interaction/category/regime basis에 대한 identifiability rank와 corpus hash binding.
+13. Optional external lifecycle trust anchor와 local-only writer-compromise 한계의 doctor 표시.
 
 남은 우선순위:
 
-1. Linux에서 실패하는 OS별 안내문 테스트를 수정하고 동일 SHA CI를 green으로 만든다.
-2. Corpus에서 CPP 연계 dependent geometry를 만드는 actual transistor compiler를 구현한다.
-3. Immutable Pad macro, corpus-derived DUT와 mesh route를 persistent target-process engine에 연결한다.
-4. Supplied Pad edge/DUT port를 쓰는 실제 21-DUT, 84-connection routing acceptance를 수행한다.
-5. Host-injected component를 포함한 real stdio persistent restart E2E와 foundry pilot을 수행한다.
+1. Corpus에서 CPP 연계 dependent geometry를 만드는 actual transistor compiler를 구현한다.
+2. Immutable Pad macro, corpus-derived DUT와 mesh route를 persistent target-process engine에 연결한다.
+3. Supplied Pad edge/DUT port를 쓰는 실제 21-DUT, 84-connection routing acceptance를 수행한다.
+4. Host-injected component를 포함한 real stdio persistent restart E2E와 foundry pilot을 수행한다.
+5. 조직의 qualification-policy authority와 독립 WORM/signed lifecycle ledger 구현을 연결한다.
 6. ext4/XFS, unsupported NFS/SMB와 폐쇄망 RHEL deployment를 qualification한다.
 
 각 항목은 drawing 자체를 막는 임의 gatekeeper가 아니라, 해당 evidence/readiness claim을
@@ -131,6 +137,7 @@ Ubuntu KLayout integration은 공식 package/checksum과 offscreen Qt를 사용�
 - Obstacle-aware multi-net global orthogonal mesh router.
 - Extracted-RC/EM/density/current-crowding 기반 routing 후보 평가.
 - Company DRC result-db와 reference precedent classifier adapter.
+- 조직 승인 기준을 발행·취소하는 qualification-policy authority와 독립 lifecycle ledger.
 - PCellizer composite-DUT 승인과 general recipe operator.
 
 ## Phase 2
