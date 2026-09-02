@@ -1,8 +1,14 @@
-"""Pad-aware endpoint and keepout synthesis for Phase 1 direct M1 routing."""
+"""Synthetic-Pad endpoint and mesh-envelope feasibility for Phase 1 direct M1 routing.
+
+Pad geometry is derived from frame/count parameters; no padset is imported or
+preserved. Mesh geometry is compiled later from the verified envelope routes.
+"""
 
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+import hashlib
+import json
 import math
 from typing import Any, Iterable, Mapping
 
@@ -112,6 +118,13 @@ def plan_phase1_terminal_routes(
 
     first_metal_role = process["first_metal_role"]
     first_metal = next(metal for metal in process["routing_metals"] if metal["layer_role"] == first_metal_role)
+    mesh_rail_width = float(first_metal["min_width_um"])
+    mesh_rail_space = required_metal_space_um(
+        first_metal,
+        width_um=mesh_rail_width,
+        parallel_length_um=max(frame_width, frame_height),
+    )
+    minimum_symmetric_mesh_envelope = 2.0 * mesh_rail_width + mesh_rail_space
     instances: dict[str, dict[str, Any]] = {}
     for index, entry in enumerate(primitive_instances):
         dut = entry.get("dut") if isinstance(entry, Mapping) else None
@@ -211,9 +224,26 @@ def plan_phase1_terminal_routes(
                 details={"connection_id": connection_id, "width_um": route_width, "first_metal": first_metal},
                 next_action="Use a process-legal route width.",
             )
+        mesh_envelope_width = _positive(
+            spec.get("mesh_envelope_width_um", minimum_symmetric_mesh_envelope),
+            field=f"route_specs[{connection_id}].mesh_envelope_width_um",
+        )
+        mesh_envelope_width = round(mesh_envelope_width, 12)
+        _grid(round(mesh_envelope_width / 2.0, 12), dbu, field=f"route_specs[{connection_id}].mesh_envelope_half_width_um")
+        if mesh_envelope_width + 1e-12 < minimum_symmetric_mesh_envelope:
+            raise AnalysisError(
+                code="MESH_ENVELOPE_TOO_NARROW",
+                message="The route corridor cannot contain baseline plus two low-resistance mesh rails.",
+                details={
+                    "connection_id": connection_id,
+                    "mesh_envelope_width_um": mesh_envelope_width,
+                    "minimum_mesh_envelope_width_um": minimum_symmetric_mesh_envelope,
+                },
+                next_action="Increase mesh_envelope_width_um and rerun bounded routing; do not fall back to one rail.",
+            )
         required_space = required_metal_space_um(
             first_metal,
-            width_um=route_width,
+            width_um=mesh_rail_width,
             parallel_length_um=max(frame_width, frame_height),
         )
         if clear_space + 1e-12 < required_space:
@@ -239,8 +269,12 @@ def plan_phase1_terminal_routes(
             "net": net,
             "start_um": start,
             "end_um": list(pad_centers[pad]),
-            "width_um": route_width,
+            "width_um": mesh_envelope_width,
             "clear_space_um": clear_space,
+            "landing_span_um": route_width,
+            "mesh_rail_width_um": mesh_rail_width,
+            "mesh_rail_space_um": mesh_rail_space,
+            "mesh_envelope_width_um": mesh_envelope_width,
             "obstacles_um": obstacles,
         }
         if spec.get("preferred_waypoints_um") is not None:
@@ -259,6 +293,25 @@ def plan_phase1_terminal_routes(
         boundary_um=[0.0, 0.0, frame_width, frame_height],
         obstacles_um=extra_obstacles_um,
     )
+    connection_by_id = {
+        connection["connection_id"]: connection for connection in connections
+    }
+    for route in report.get("routes", []):
+        contract = connection_by_id[route["connection_id"]]
+        route.update(
+            {
+                "landing_span_um": contract["landing_span_um"],
+                "mesh_rail_width_um": contract["mesh_rail_width_um"],
+                "mesh_rail_space_um": contract["mesh_rail_space_um"],
+                "mesh_envelope_width_um": contract["mesh_envelope_width_um"],
+            }
+        )
+    if report.get("feasible"):
+        report["route_fingerprint_sha256"] = hashlib.sha256(
+            json.dumps(
+                report["routes"], sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
     return {
         "ok": True,
         "contract_version": 1,
@@ -273,4 +326,11 @@ def plan_phase1_terminal_routes(
         "routing_layer_roles_used": [first_metal_role] if report["feasible"] else [],
         "additional_metals_generated": [],
         "layer_escalation_performed": False,
+        "mesh_compiler_contract": {
+            "integrated": True,
+            "single_rail_fallback_allowed": False,
+            "mesh_rail_width_um": mesh_rail_width,
+            "mesh_rail_space_um": mesh_rail_space,
+            "minimum_symmetric_mesh_envelope_um": minimum_symmetric_mesh_envelope,
+        },
     }

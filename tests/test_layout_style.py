@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import json
 from pathlib import Path
+import threading
 
 import pytest
 
+from klayout_mcp import style_service
 from klayout_mcp.errors import AnalysisError
 from klayout_mcp.klayout_adapter import find_klayout_executable
 from klayout_mcp.server import extract_layout_style
@@ -78,3 +82,36 @@ def test_style_profile_never_overwrites_existing_output(tmp_path: Path) -> None:
     assert result["ok"] is False
     assert result["code"] == "OUTPUT_ALREADY_EXISTS"
     assert output.read_text(encoding="utf-8") == "keep"
+
+
+def test_style_profile_concurrent_publish_preserves_one_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "style.json"
+    barrier = threading.Barrier(2)
+    real_publish = style_service.publish_new_file
+
+    def synchronized_publish(staged_path, final_path):
+        barrier.wait()
+        return real_publish(staged_path, final_path)
+
+    monkeypatch.setattr(style_service, "publish_new_file", synchronized_publish)
+
+    def write_profile(writer: int) -> str:
+        try:
+            style_service._atomic_json(output, {"writer": writer})
+        except AnalysisError as exc:
+            assert exc.code == "OUTPUT_ALREADY_EXISTS"
+            return "already_exists"
+        return "published"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(write_profile, (1, 2)))
+
+    assert outcomes.count("published") == 1
+    assert outcomes.count("already_exists") == 1
+    assert json.loads(output.read_text(encoding="utf-8")) in (
+        {"writer": 1},
+        {"writer": 2},
+    )
+    assert list(tmp_path.glob(".klayout-stage-file-style-*.json")) == []

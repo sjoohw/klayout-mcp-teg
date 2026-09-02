@@ -3,8 +3,11 @@ from __future__ import annotations
 import copy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import hashlib
 import json
+import os
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -21,6 +24,7 @@ from klayout_mcp.kelvin_workflow import (
     SLN001_KELVIN_PROCESS_CAPABILITY,
 )
 from klayout_mcp.process_capability import validate_process_capability
+from klayout_mcp.technology_registry import TechnologyAdapterRegistry
 from conftest import SYNTHETIC_PROCESS_CAPABILITY
 from klayout_mcp.workflow_manifest import canonical_sha256, validate_design_intent_draft
 from klayout_mcp.workflow_store import (
@@ -470,6 +474,119 @@ def test_store_contract_does_not_trust_persisted_approval_boolean():
     assert contract["approval_boolean_grants_authority"] is False
     assert contract["approval_reverified_for_every_privileged_action"] is True
     assert contract["live_process_capability_rehashed_for_every_privileged_action"] is True
+    assert contract["content_document_publish_concurrent_no_clobber"] is True
+    assert contract["final_output_publish_concurrent_no_clobber"] is True
+    assert contract["incomplete_drafts_persisted"] is True
+    assert contract["incomplete_drafts_are_immutable_revisions"] is True
+
+
+def test_concurrent_content_publish_is_idempotent_for_same_payload(tmp_path):
+    store = WorkflowJobStore(tmp_path / "jobs", output_root=tmp_path / "outputs")
+    target = store.documents_root / "race" / "same.json"
+    payload = b'{"same":true}\n'
+    barrier = threading.Barrier(8)
+
+    def publish() -> None:
+        barrier.wait()
+        store._atomic_write(target, payload, replace=False)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(lambda _: publish(), range(8)))
+
+    assert target.read_bytes() == payload
+    assert list(target.parent.glob(".klayout-stage-file-workflow-document-*")) == []
+
+
+def test_concurrent_content_publish_rejects_different_payload_without_clobber(
+    tmp_path,
+):
+    store = WorkflowJobStore(tmp_path / "jobs", output_root=tmp_path / "outputs")
+    target = store.documents_root / "race" / "collision.json"
+    payloads = (b'{"writer":1}\n', b'{"writer":2}\n')
+    barrier = threading.Barrier(2)
+
+    def publish(payload: bytes) -> str:
+        barrier.wait()
+        try:
+            store._atomic_write(target, payload, replace=False)
+        except AnalysisError as exc:
+            assert exc.code == "WORKFLOW_CONTENT_ADDRESS_COLLISION"
+            return "collision"
+        return "published"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(publish, payloads))
+
+    assert outcomes.count("published") == 1
+    assert outcomes.count("collision") == 1
+    assert target.read_bytes() in payloads
+    assert list(target.parent.glob(".klayout-stage-file-workflow-document-*")) == []
+
+
+def test_concurrent_final_promotion_preserves_one_different_content_winner(
+    tmp_path,
+):
+    output_root = tmp_path / "outputs"
+    store = WorkflowJobStore(tmp_path / "jobs", output_root=output_root)
+    payloads = (b"writer-one", b"writer-two")
+    staged_paths = []
+    for index, payload in enumerate(payloads):
+        staged = output_root / f"stage-{index}.gds"
+        staged.write_bytes(payload)
+        staged_paths.append(staged)
+    final = output_root / "final.gds"
+    barrier = threading.Barrier(2)
+
+    def promote(index: int) -> str:
+        barrier.wait()
+        expected = hashlib.sha256(payloads[index]).hexdigest()
+        try:
+            store.promote_staged_output(
+                staged_path=staged_paths[index],
+                final_target=final,
+                expected_sha256=expected,
+            )
+        except AnalysisError as exc:
+            assert exc.code == "WORKFLOW_FINAL_PROMOTION_CONFLICT"
+            return "conflict"
+        return "published"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(promote, range(2)))
+
+    assert outcomes.count("published") == 1
+    assert outcomes.count("conflict") == 1
+    assert final.read_bytes() in payloads
+    assert list(output_root.glob(".klayout-stage-file-workflow-promote-*")) == []
+
+
+def test_concurrent_final_promotion_is_idempotent_for_same_content(tmp_path):
+    output_root = tmp_path / "outputs"
+    store = WorkflowJobStore(tmp_path / "jobs", output_root=output_root)
+    payload = b"same-content"
+    expected = hashlib.sha256(payload).hexdigest()
+    staged_paths = []
+    for index in range(2):
+        staged = output_root / f"same-stage-{index}.gds"
+        staged.write_bytes(payload)
+        staged_paths.append(staged)
+    final = output_root / "same-final.gds"
+    barrier = threading.Barrier(2)
+
+    def promote(staged: Path) -> Path:
+        barrier.wait()
+        return store.promote_staged_output(
+            staged_path=staged,
+            final_target=final,
+            expected_sha256=expected,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(promote, staged_paths))
+
+    assert results == [final, final]
+    assert final.read_bytes() == payload
+    assert list(output_root.glob(".klayout-stage-file-workflow-promote-*")) == []
 
 
 @pytest.mark.parametrize("family", ["transistor", "resistor", "capacitor"])
@@ -628,10 +745,99 @@ def test_unresolved_questions_do_not_create_authorizable_job(tmp_path):
 
     assert result["workflow_status"] == "input_required"
     assert result["job_created"] is False
-    assert result["draft_persisted"] is False
+    assert result["draft_persisted"] is True
+    assert result["draft_revision"] == 1
+    assert result["resume_token"]
+    assert result["clarification_request"]["questions"][0]["question_id"].endswith("-q001")
+    assert result["clarification_request"]["mutation_state"]["geometry_generation_started"] is False
     assert result["authorizes_planning"] is False
     assert not (tmp_path / "jobs" / "jobs" / "blocked-job" / "head.json").exists()
     assert not (tmp_path / "jobs" / "documents" / "design_intent").exists()
+
+
+def test_pinned_technology_registry_snapshot_is_rechecked_before_plan(tmp_path):
+    registry = TechnologyAdapterRegistry(tmp_path / "technology-registry")
+    package = {
+        "schema_version": 1,
+        "identity": {
+            "technology": "synthetic-tech",
+            "pdk_revision": "test-v1",
+            "adapter_kind": "transistor",
+            "device_family": "planar",
+            "topology": "example-nmos",
+            "package_version": "1.0.0",
+        },
+        "status": "candidate_scored_not_foundry_qualified",
+    }
+    registered = registry.register_package(package)
+    snapshot = registry.snapshot()
+    draft = _draft()
+    draft["technology_adapter"] = {
+        "identity": package["identity"],
+        "package_sha256": registered["package_sha256"],
+        "registry_snapshot_sha256": snapshot["snapshot_sha256"],
+    }
+    facade = _facade(
+        tmp_path,
+        verifier=ExactVerifier(),
+        planner=DeterministicPlanner(),
+    )
+    facade.technology_registry = registry
+    intake = facade.teg_intake(design_intent_draft=draft, job_id="adapter-pin")
+    assert intake["workflow_status"] == "intent_draft_complete"
+
+    registry.append_lifecycle_record(
+        package_sha256=registered["package_sha256"],
+        action="revoked",
+        reason="test revocation",
+        recorded_at="2026-09-02T00:00:00Z",
+        signer_reference="host-trust://test",
+        signature_sha256="d" * 64,
+    )
+
+    with pytest.raises(AnalysisError) as caught:
+        facade.teg_plan(job_id="adapter-pin", approval_reference=_reference(draft))
+
+    assert caught.value.code == "TECH_ADAPTER_REGISTRY_SNAPSHOT_DRIFT"
+
+
+def test_incomplete_draft_resumes_as_new_immutable_revision(tmp_path):
+    facade = _facade(tmp_path)
+    first = facade.teg_intake(
+        design_intent_draft=_draft(unresolved=["confirm terminal orientation"]),
+        draft_id="device-draft",
+    )
+    corrected = _draft()
+
+    second = facade.teg_intake(
+        design_intent_draft=corrected,
+        job_id="resumed-job",
+        draft_id="device-draft",
+        expected_draft_revision=first["draft_revision"],
+        resume_token=first["resume_token"],
+    )
+
+    assert second["workflow_status"] == "intent_draft_complete"
+    assert second["draft_revision"] == 2
+    original = facade.store.get_draft_revision(draft_id="device-draft", revision=1)
+    latest = facade.store.get_draft_revision(draft_id="device-draft", revision=2)
+    assert original["document"]["unresolved_questions"]
+    assert latest["document"]["unresolved_questions"] == []
+
+
+def test_validate_only_intake_does_not_persist_draft_or_job(tmp_path):
+    facade = _facade(tmp_path)
+
+    result = facade.teg_intake(
+        design_intent_draft=_draft(unresolved=["confirm terminal orientation"]),
+        draft_id="preflight-draft",
+        validate_only=True,
+    )
+
+    assert result["workflow_status"] == "input_required"
+    assert result["draft_persisted"] is False
+    assert result["clarification_request"]["mutation_state"]["stage_appended"] is False
+    assert not (tmp_path / "jobs" / "drafts" / "preflight-draft").exists()
 
 
 def test_live_process_mutation_is_rejected(tmp_path):
@@ -1466,3 +1672,25 @@ def test_tampered_non_head_ancestor_is_rejected(tmp_path):
         facade.store.head("ancestor-tamper")
 
     assert caught.value.code == "WORKFLOW_MANIFEST_INTEGRITY_FAILURE"
+
+
+def test_workflow_store_exposes_output_publication_doctor_and_scavenger(tmp_path):
+    store = WorkflowJobStore(tmp_path / "jobs", output_root=tmp_path / "safe-output")
+
+    status = store.publication_status(active_probe=True)
+
+    assert status["supported_filesystem"] is True
+    assert status["file_create_only_probe"] is True
+    assert status["directory_create_only_probe"] is True
+
+    stale = store.output_root / ".klayout-stage-file-workflow-999-dead"
+    unrelated = store.output_root / "user-file"
+    stale.write_bytes(b"stale")
+    unrelated.write_bytes(b"keep")
+    os.utime(stale, (1, 1))
+
+    report = store.scavenge_staging(ttl_seconds=1)
+
+    assert report["removed_file_count"] == 1
+    assert not stale.exists()
+    assert unrelated.read_bytes() == b"keep"

@@ -4,9 +4,33 @@ import pytest
 
 from klayout_mcp.errors import AnalysisError
 from klayout_mcp.mesh_routing import (
+    synthesize_mesh_polyline,
     synthesize_maximum_contact_array,
     synthesize_staged_mesh_segment,
 )
+
+
+def test_polyline_mesh_compiles_every_segment_with_bend_ties() -> None:
+    result = synthesize_mesh_polyline(
+        dbu_um=0.001,
+        points_um=[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]],
+        segment_corridors_um=[
+            [0.0, -0.05, 10.0, 0.25],
+            [9.95, 0.0, 10.25, 10.0],
+        ],
+        rail_width_um=0.1,
+        rail_space_um=0.1,
+        landing_span_um=0.1,
+        cross_tie_pitch_um=1.0,
+    )
+
+    evidence = result["evidence"]
+    assert evidence["geometry_kind"] == "connected_multi_segment_low_resistance_mesh"
+    assert evidence["segment_count"] == 2
+    assert evidence["bend_joint_count"] == 1
+    assert evidence["single_rail_fallback_allowed"] is False
+    assert all(segment["evidence"]["rail_count"] >= 2 for segment in evidence["segments"])
+    assert len(result["operations"]) > 4
 
 
 def _mesh(**overrides):

@@ -19,6 +19,13 @@ from .approval import (
 )
 from .errors import AnalysisError
 from .evidence_state import evaluate_evidence_ladder
+from .file_publication import (
+    OutputAlreadyExistsError,
+    publication_root_doctor,
+    publication_staging_prefix,
+    publish_new_file,
+    scavenge_stale_publication_entries,
+)
 from .external_evidence import (
     ExternalEvidenceAdapterRegistry,
     SignoffPolicy,
@@ -26,6 +33,8 @@ from .external_evidence import (
     verify_external_report,
 )
 from .process_capability import validate_process_capability
+from .technology_registry import TechnologyAdapterRegistry
+from .validation_report import ClarificationQuestion, ValidationReport
 from .workflow_manifest import (
     SHA256_PATTERN,
     build_job_manifest,
@@ -244,7 +253,7 @@ class TegPlanningEngine(Protocol):
 
 @runtime_checkable
 class TegGenerationEngine(Protocol):
-    """Host-selected atomic generator hidden behind the small public facade."""
+    """Host-selected staged generator hidden behind the small public facade."""
 
     engine_id: str
 
@@ -315,6 +324,22 @@ class WorkflowEngineRegistry:
             "model_can_register_or_import_engines": False,
             "registered_profiles": sorted(self._entries),
         }
+
+    def readiness(self) -> list[dict[str, Any]]:
+        """Return non-mutating profile engine readiness for host startup diagnostics."""
+
+        return [
+            {
+                "process_profile": profile,
+                "planning_engine_id": planning.engine_id,
+                "planning_engine_configured": True,
+                "generation_engine_id": (
+                    None if generation is None else generation.engine_id
+                ),
+                "generation_engine_configured": generation is not None,
+            }
+            for profile, (planning, generation) in sorted(self._entries.items())
+        ]
 
 
 def load_live_process_capability(
@@ -469,6 +494,7 @@ class WorkflowJobStore:
         self.documents_root = self.root / "documents"
         self.manifests_root = self.root / "manifests"
         self.jobs_root = self.root / "jobs"
+        self.drafts_root = self.root / "drafts"
         self.locks_root = self.root / "locks"
         if initialize:
             for directory in (
@@ -477,13 +503,28 @@ class WorkflowJobStore:
                 self.documents_root,
                 self.manifests_root,
                 self.jobs_root,
+                self.drafts_root,
                 self.locks_root,
             ):
                 directory.mkdir(parents=True, exist_ok=True)
         _resolved_inside(self.root, self.documents_root, field="documents_root")
         _resolved_inside(self.root, self.manifests_root, field="manifests_root")
         _resolved_inside(self.root, self.jobs_root, field="jobs_root")
+        _resolved_inside(self.root, self.drafts_root, field="drafts_root")
         _resolved_inside(self.root, self.locks_root, field="locks_root")
+
+    def publication_status(self, *, active_probe: bool = False) -> dict[str, object]:
+        """Report create-only publication readiness for the configured output root."""
+
+        return publication_root_doctor(self.output_root, active_probe=active_probe)
+
+    def scavenge_staging(self, *, ttl_seconds: float) -> dict[str, object]:
+        """Remove only expired, owner-tagged publication staging entries."""
+
+        return scavenge_stale_publication_entries(
+            self.output_root,
+            ttl_seconds=ttl_seconds,
+        )
 
     @contextmanager
     def _job_lock(self, job_id: str) -> Iterator[None]:
@@ -538,7 +579,9 @@ class WorkflowJobStore:
         # Do not repeat a 64-character content hash in the temporary basename.
         # Keeping this name short avoids legacy Win32 path-length failures while
         # preserving same-directory atomic replacement on Windows and Linux.
-        temporary = native_path.parent / f".tmp-{uuid.uuid4().hex}"
+        temporary = native_path.parent / (
+            f"{publication_staging_prefix('workflow-document')}{uuid.uuid4().hex}"
+        )
         try:
             with temporary.open("xb") as handle:
                 handle.write(payload)
@@ -547,7 +590,9 @@ class WorkflowJobStore:
             if replace:
                 os.replace(temporary, native_path)
             else:
-                if native_path.exists():
+                try:
+                    publish_new_file(temporary, native_path)
+                except OutputAlreadyExistsError:
                     existing = native_path.read_bytes()
                     if existing != payload:
                         _fail(
@@ -555,14 +600,12 @@ class WorkflowJobStore:
                             "Existing content-addressed storage differs at the same digest.",
                             details={"path": str(path)},
                         )
-                else:
-                    os.replace(temporary, native_path)
-                    if native_path.read_bytes() != payload:
-                        _fail(
-                            "WORKFLOW_STORE_WRITE_INTEGRITY_FAILURE",
-                            "A content-addressed write failed its immediate readback check.",
-                            details={"path": str(path)},
-                        )
+                if native_path.read_bytes() != payload:
+                    _fail(
+                        "WORKFLOW_STORE_WRITE_INTEGRITY_FAILURE",
+                        "A content-addressed write failed its immediate readback check.",
+                        details={"path": str(path)},
+                    )
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -605,6 +648,157 @@ class WorkflowJobStore:
                 details={"kind": kind, "expected": digest, "actual": actual},
             )
         return document
+
+    def append_draft_revision(
+        self,
+        *,
+        draft_id: str,
+        document: Mapping[str, Any],
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Append or idempotently reuse one immutable intake draft revision."""
+
+        safe_draft_id = _job_id(draft_id)
+        if expected_revision is not None and (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            _fail(
+                "INVALID_DRAFT_REVISION",
+                "expected_draft_revision must be a non-negative integer.",
+                details={"field": "expected_draft_revision", "value": expected_revision},
+            )
+        draft_directory = _resolved_inside(
+            self.drafts_root,
+            self.drafts_root / safe_draft_id,
+            field="draft_directory",
+        )
+        with self._job_lock(safe_draft_id):
+            draft_directory.mkdir(parents=True, exist_ok=True)
+            revision_paths = sorted(draft_directory.glob("[0-9][0-9][0-9][0-9][0-9][0-9]-*.json"))
+            current_record = None if not revision_paths else self._read_json(revision_paths[-1])
+            current_revision = 0 if current_record is None else current_record.get("revision")
+            if not isinstance(current_revision, int) or current_revision < 0:
+                _fail(
+                    "DRAFT_REVISION_STORE_INTEGRITY_FAILURE",
+                    "The latest persisted draft revision is malformed.",
+                    details={"draft_id": safe_draft_id},
+                )
+            if expected_revision is not None and expected_revision != current_revision:
+                _fail(
+                    "DRAFT_REVISION_CONFLICT",
+                    "The intake draft changed after the caller last read it.",
+                    details={
+                        "draft_id": safe_draft_id,
+                        "field": "expected_draft_revision",
+                        "expected": expected_revision,
+                        "received": current_revision,
+                    },
+                )
+            normalized = immutable_json_copy(document)
+            document_sha256 = canonical_sha256(normalized)
+            if current_record is not None and current_record.get("document_sha256") == document_sha256:
+                return {
+                    **current_record,
+                    "record_sha256": canonical_sha256(current_record),
+                    "resume_token": canonical_sha256(
+                        {
+                            "draft_id": safe_draft_id,
+                            "revision": current_revision,
+                            "record_sha256": canonical_sha256(current_record),
+                        }
+                    ),
+                    "idempotent": True,
+                }
+            revision = current_revision + 1
+            parent_record_sha256 = (
+                None if current_record is None else canonical_sha256(current_record)
+            )
+            record = {
+                "schema_version": 1,
+                "draft_id": safe_draft_id,
+                "revision": revision,
+                "parent_record_sha256": parent_record_sha256,
+                "document_sha256": document_sha256,
+                "document": normalized,
+            }
+            record_sha256 = canonical_sha256(record)
+            revision_path = draft_directory / f"{revision:06d}-{record_sha256}.json"
+            self._atomic_write(
+                revision_path,
+                canonical_json_bytes(record),
+                replace=False,
+            )
+            return {
+                **record,
+                "record_sha256": record_sha256,
+                "resume_token": canonical_sha256(
+                    {
+                        "draft_id": safe_draft_id,
+                        "revision": revision,
+                        "record_sha256": record_sha256,
+                    }
+                ),
+                "idempotent": False,
+            }
+
+    def get_draft_revision(
+        self,
+        *,
+        draft_id: str,
+        revision: int | None = None,
+        resume_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Load and hash-verify one immutable draft revision."""
+
+        safe_draft_id = _job_id(draft_id)
+        draft_directory = _resolved_inside(
+            self.drafts_root,
+            self.drafts_root / safe_draft_id,
+            field="draft_directory",
+        )
+        paths = sorted(draft_directory.glob("[0-9][0-9][0-9][0-9][0-9][0-9]-*.json"))
+        if revision is not None:
+            paths = [path for path in paths if path.name.startswith(f"{revision:06d}-")]
+        if not paths:
+            _fail(
+                "DRAFT_REVISION_NOT_FOUND",
+                "The requested immutable intake draft revision was not found.",
+                details={"draft_id": safe_draft_id, "revision": revision},
+            )
+        record = self._read_json(paths[-1])
+        record_sha256 = canonical_sha256(record)
+        if paths[-1].stem.split("-", 1)[-1] != record_sha256:
+            _fail(
+                "DRAFT_REVISION_STORE_INTEGRITY_FAILURE",
+                "The persisted draft revision no longer matches its content address.",
+                details={"draft_id": safe_draft_id, "revision": record.get("revision")},
+            )
+        expected_token = canonical_sha256(
+            {
+                "draft_id": safe_draft_id,
+                "revision": record["revision"],
+                "record_sha256": record_sha256,
+            }
+        )
+        if resume_token is not None and resume_token != expected_token:
+            _fail(
+                "DRAFT_RESUME_TOKEN_MISMATCH",
+                "The resume token does not identify this exact draft revision.",
+                details={"draft_id": safe_draft_id, "revision": record["revision"]},
+            )
+        if canonical_sha256(record.get("document")) != record.get("document_sha256"):
+            _fail(
+                "DRAFT_REVISION_STORE_INTEGRITY_FAILURE",
+                "The persisted draft document hash is invalid.",
+                details={"draft_id": safe_draft_id, "revision": record.get("revision")},
+            )
+        return {
+            **record,
+            "record_sha256": record_sha256,
+            "resume_token": expected_token,
+        }
 
     def append_manifest(
         self,
@@ -791,7 +985,10 @@ class WorkflowJobStore:
         if _native_io_path(target).exists():
             _fail(
                 "WORKFLOW_OUTPUT_ALREADY_EXISTS",
-                "Atomic generation requires a new output path.",
+                (
+                    "Generation requires a new output path. If a concurrent writer publishes "
+                    "during generation, create-only promotion preserves that winner."
+                ),
                 details={"path": str(target)},
             )
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -815,7 +1012,7 @@ class WorkflowJobStore:
         final_target: Path,
         expected_sha256: str,
     ) -> Path:
-        """Promote a verified stage through a sibling temporary and atomic replace."""
+        """Publish a verified sibling copy without replacing a concurrent winner."""
 
         expected = _sha256(expected_sha256, field="staged_layout_sha256")
         staged = _resolved_inside(
@@ -858,7 +1055,9 @@ class WorkflowJobStore:
                     "actual_sha256": actual_staged,
                 },
             )
-        temporary = target.parent / f".promote-{uuid.uuid4().hex}"
+        temporary = target.parent / (
+            f"{publication_staging_prefix('workflow-promote')}{uuid.uuid4().hex}"
+        )
         native_staged = _native_io_path(staged)
         native_temporary = _native_io_path(temporary)
         native_target = _native_io_path(target)
@@ -874,7 +1073,26 @@ class WorkflowJobStore:
                     "The final promotion copy failed its pre-commit hash check.",
                     details={"path": str(temporary)},
                 )
-            os.replace(native_temporary, native_target)
+            try:
+                publish_new_file(native_temporary, native_target)
+            except OutputAlreadyExistsError:
+                if not native_target.is_file():
+                    _fail(
+                        "WORKFLOW_FINAL_PROMOTION_CONFLICT",
+                        "The final output name is occupied by a non-file target.",
+                        details={"path": str(target)},
+                    )
+                actual_target = _file_sha256(target)
+                if actual_target != expected:
+                    _fail(
+                        "WORKFLOW_FINAL_PROMOTION_CONFLICT",
+                        "A concurrent writer published different final output content.",
+                        details={
+                            "path": str(target),
+                            "expected_sha256": expected,
+                            "actual_sha256": actual_target,
+                        },
+                    )
         finally:
             native_temporary.unlink(missing_ok=True)
         if _file_sha256(target) != expected:
@@ -901,6 +1119,7 @@ class TegWorkflowFacade:
         external_evidence_registry: ExternalEvidenceAdapterRegistry | None = None,
         external_report_root: str | Path | None = None,
         signoff_policy: SignoffPolicy | None = None,
+        technology_registry: TechnologyAdapterRegistry | None = None,
         output_class: str = "nonproduction_gds",
         production_mode: bool = True,
         clock: Callable[[], datetime] | None = None,
@@ -913,6 +1132,7 @@ class TegWorkflowFacade:
         self.engine_registry = engine_registry
         self.external_evidence_registry = external_evidence_registry
         self.signoff_policy = signoff_policy
+        self.technology_registry = technology_registry
         self.external_report_root = (
             None if external_report_root is None else Path(external_report_root).resolve()
         )
@@ -926,11 +1146,79 @@ class TegWorkflowFacade:
         self.production_mode = production_mode
         self.clock = clock
 
+    def _resolve_technology_adapter(
+        self, design_intent: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        reference = design_intent.get("technology_adapter")
+        transistor_requested = any(
+            device.get("family") == "transistor"
+            for device in design_intent.get("devices", [])
+            if isinstance(device, Mapping)
+        )
+        if reference is None:
+            if (
+                transistor_requested
+                and self.production_mode
+                and self.output_class == "production_gds"
+            ):
+                _fail(
+                    "TECH_ADAPTER_REFERENCE_REQUIRED",
+                    "Production transistor intent must pin an exact technology adapter package and registry snapshot.",
+                    details={"field": "technology_adapter", "stage": "adapter_resolution"},
+                )
+            return None
+        if self.technology_registry is None:
+            _fail(
+                "TECH_ADAPTER_REGISTRY_UNAVAILABLE",
+                "The host has no immutable technology adapter registry configured.",
+                details={"field": "technology_adapter", "stage": "adapter_resolution"},
+            )
+        snapshot = self.technology_registry.snapshot()
+        if snapshot["snapshot_sha256"] != reference["registry_snapshot_sha256"]:
+            _fail(
+                "TECH_ADAPTER_REGISTRY_SNAPSHOT_DRIFT",
+                "The active registry snapshot differs from the snapshot pinned by the design intent.",
+                details={
+                    "field": "technology_adapter.registry_snapshot_sha256",
+                    "expected": reference["registry_snapshot_sha256"],
+                    "received": snapshot["snapshot_sha256"],
+                    "stage": "adapter_resolution",
+                },
+            )
+        resolved = self.technology_registry.resolve(
+            reference["identity"],
+            expected_package_sha256=reference["package_sha256"],
+        )
+        if (
+            self.production_mode
+            and self.output_class == "production_gds"
+            and not resolved["qualified"]
+        ):
+            _fail(
+                "TECH_ADAPTER_NOT_QUALIFIED",
+                "Production generation requires an explicitly qualified active adapter package.",
+                details={
+                    "field": "technology_adapter.package_sha256",
+                    "package_sha256": resolved["package_sha256"],
+                    "stage": "adapter_resolution",
+                },
+            )
+        return {
+            "package_sha256": resolved["package_sha256"],
+            "registry_snapshot_sha256": snapshot["snapshot_sha256"],
+            "package": resolved["package"],
+            "qualified": resolved["qualified"],
+        }
+
     def teg_intake(
         self,
         *,
         design_intent_draft: Mapping[str, Any] | None = None,
         job_id: str | None = None,
+        draft_id: str | None = None,
+        expected_draft_revision: int | None = None,
+        resume_token: str | None = None,
+        validate_only: bool = False,
         template_process_profile: str | None = None,
         template_process_version: str | None = None,
         template_family: str | None = None,
@@ -948,20 +1236,93 @@ class TegWorkflowFacade:
             design_intent_draft=draft,
             provider=self.process_provider,
         )
+        technology_adapter = self._resolve_technology_adapter(draft)
+        safe_draft_id = _job_id(draft_id or f"draft-{draft_hash[:20]}")
+        if resume_token is not None:
+            current_draft = self.store.get_draft_revision(
+                draft_id=safe_draft_id,
+                resume_token=resume_token,
+            )
+            if (
+                expected_draft_revision is not None
+                and current_draft["revision"] != expected_draft_revision
+            ):
+                _fail(
+                    "DRAFT_REVISION_CONFLICT",
+                    "The supplied revision and resume token identify different draft states.",
+                    details={
+                        "draft_id": safe_draft_id,
+                        "expected": expected_draft_revision,
+                        "received": current_draft["revision"],
+                    },
+                )
+        draft_revision = None
+        if not validate_only:
+            draft_revision = self.store.append_draft_revision(
+                draft_id=safe_draft_id,
+                document=draft,
+                expected_revision=expected_draft_revision,
+            )
         if not draft_result["draft_complete"]:
+            questions = tuple(
+                ClarificationQuestion(
+                    question_id=f"{safe_draft_id}-q{index:03d}",
+                    question=str(question),
+                    reason="Planning cannot safely infer this design decision.",
+                    answer_schema={"type": "string", "minLength": 1},
+                )
+                for index, question in enumerate(draft["unresolved_questions"], start=1)
+            )
+            clarification = ValidationReport.build(
+                summary=(
+                    f"intake 단계에서 사용자 결정 {len(questions)}건이 필요하여 "
+                    "geometry 생성을 시작하지 않았습니다."
+                ),
+                issues=[],
+                questions=questions,
+                draft_id=safe_draft_id,
+                draft_revision=(None if draft_revision is None else draft_revision["revision"]),
+                next_action="Answer the listed questions and resubmit the corrected full draft.",
+                retry_stage="intake",
+                resume_token=(None if draft_revision is None else draft_revision["resume_token"]),
+                stage_appended=draft_revision is not None,
+            ).to_dict()
             return {
                 "ok": True,
                 "workflow_status": "input_required",
                 "job_created": False,
                 "design_intent_sha256": draft_hash,
-                "draft_persisted": False,
+                "draft_id": safe_draft_id,
+                "draft_revision": None if draft_revision is None else draft_revision["revision"],
+                "draft_persisted": draft_revision is not None,
+                "resume_token": None if draft_revision is None else draft_revision["resume_token"],
+                "validate_only": validate_only,
                 "unresolved_questions": list(draft["unresolved_questions"]),
+                "clarification_request": clarification,
+                "authorizes_planning": False,
+                "authorizes_generation": False,
+                "production_ready": False,
+            }
+        if validate_only:
+            return {
+                "ok": True,
+                "workflow_status": "preflight_complete",
+                "job_created": False,
+                "design_intent_sha256": draft_hash,
+                "process_capability_sha256": live["capability_sha256"],
+                "draft_id": safe_draft_id,
+                "draft_persisted": False,
+                "validate_only": True,
                 "authorizes_planning": False,
                 "authorizes_generation": False,
                 "production_ready": False,
             }
         stored_draft_hash = self.store.put_document("design_intent", draft)
         self.store.put_document("process_capability", live["capability"])
+        if technology_adapter is not None:
+            self.store.put_document(
+                "technology_adapter_package", technology_adapter["package"]
+            )
         safe_job_id = _job_id(job_id or f"teg-{draft_hash[:20]}")
         created_at = _utc_now(self.clock).isoformat()
         manifest = {
@@ -979,9 +1340,30 @@ class TegWorkflowFacade:
             "normalized_inputs": {
                 "design_intent_sha256": draft_hash,
                 "process_capability_sha256": live["capability_sha256"],
+                **(
+                    {}
+                    if technology_adapter is None
+                    else {
+                        "technology_adapter_package_sha256": technology_adapter[
+                            "package_sha256"
+                        ],
+                        "technology_adapter_registry_snapshot_sha256": technology_adapter[
+                            "registry_snapshot_sha256"
+                        ],
+                    }
+                ),
             },
             "outputs": [],
-            "fingerprints": {},
+            "fingerprints": (
+                {}
+                if technology_adapter is None
+                else {
+                    "technology_adapter_package": technology_adapter["package_sha256"],
+                    "technology_adapter_registry_snapshot": technology_adapter[
+                        "registry_snapshot_sha256"
+                    ],
+                }
+            ),
             "runtime": {"process_provider_id": live["provider_id"]},
             "warnings": [],
             "blockers": ["trusted approval must be reverified before planning"],
@@ -998,6 +1380,10 @@ class TegWorkflowFacade:
             "manifest_sha256": appended["manifest_sha256"],
             "design_intent_sha256": draft_hash,
             "process_capability_sha256": live["capability_sha256"],
+            "draft_id": safe_draft_id,
+            "draft_revision": draft_revision["revision"],
+            "resume_token": draft_revision["resume_token"],
+            "draft_persisted": True,
             "authorizes_planning": False,
             "authorizes_generation": False,
             "production_ready": False,
@@ -1280,6 +1666,22 @@ class TegWorkflowFacade:
             design_intent_draft=draft,
             provider=self.process_provider,
         )
+        technology_adapter = self._resolve_technology_adapter(draft)
+        if technology_adapter is not None:
+            stored_adapter = self.store.get_document(
+                "technology_adapter_package",
+                technology_adapter["package_sha256"],
+            )
+            if canonical_sha256(stored_adapter) != technology_adapter["package_sha256"]:
+                _fail(
+                    "TECH_ADAPTER_PERSISTED_PACKAGE_DRIFT",
+                    "The persisted job adapter package differs from the active exact registry entry.",
+                    details={
+                        "job_id": job_id,
+                        "package_sha256": technology_adapter["package_sha256"],
+                        "stage": "adapter_resolution",
+                    },
+                )
         if live["capability_sha256"] != manifest["process_capability_sha256"]:
             _fail(
                 "WORKFLOW_JOB_PROCESS_DRIFT",
@@ -1314,6 +1716,7 @@ class TegWorkflowFacade:
             "head_manifest_sha256": head["manifest_sha256"],
             "design_intent": draft,
             "live_process_capability": live["capability"],
+            "technology_adapter": technology_adapter,
             "approval_reference_sha256": reference_hash,
             "approval_verification_receipt_sha256": approval[
                 "verification_receipt_sha256"
@@ -1587,7 +1990,7 @@ class TegWorkflowFacade:
         approval_reference: Mapping[str, Any],
         output_name: str,
     ) -> dict[str, Any]:
-        """Reverify generation scope and atomically emit one final stream file."""
+        """Reverify scope and emit through create-only staged promotion."""
 
         scope = self._approval_scope(approval_reference, generation=True)
         context = self.reverify_privileged_action(
@@ -2122,7 +2525,7 @@ class TegWorkflowFacade:
         if actual != output["content_sha256"]:
             _fail(
                 "WORKFLOW_FINAL_OUTPUT_INTEGRITY_FAILURE",
-                "The final layout changed after atomic generation.",
+                "The final layout changed after staged generation promotion.",
                 details={
                     "job_id": job_id,
                     "expected": output["content_sha256"],
@@ -2547,7 +2950,7 @@ class TegWorkflowFacade:
 
 def workflow_store_contract() -> dict[str, Any]:
     return {
-        "contract_version": 1,
+        "contract_version": 2,
         "documents_content_addressed": True,
         "manifests_append_only": True,
         "per_job_manifest_append_serialized_across_local_processes": True,
@@ -2562,7 +2965,12 @@ def workflow_store_contract() -> dict[str, Any]:
         "production_test_mock_verifiers_allowed": False,
         "workflow_engines_host_registered_by_process_profile": True,
         "model_can_register_or_import_engines": False,
-        "incomplete_drafts_persisted": False,
+        "incomplete_drafts_persisted": True,
+        "incomplete_drafts_are_immutable_revisions": True,
+        "draft_resume_token_content_bound": True,
+        "validate_only_does_not_persist": True,
+        "validation_errors_include_actionable_report": True,
+        "technology_adapter_exact_package_and_snapshot_pinned": True,
         "measurement_manifest_requires_fresh_layout_file_hash": True,
         "measurement_execution_semantics_bound_to_approved_intent": True,
         "measurement_safety_envelope_cannot_be_relaxed_by_manifest": True,
@@ -2576,6 +2984,8 @@ def workflow_store_contract() -> dict[str, Any]:
         "signoff_requires_exact_host_policy_evidence_set": True,
         "signoff_state_means_production_ready": False,
         "generation_uses_durable_staging_before_final_promotion": True,
+        "content_document_publish_concurrent_no_clobber": True,
+        "final_output_publish_concurrent_no_clobber": True,
         "generation_resume_after_final_write_without_engine_rerun": True,
         "status_rehashes_workflow_documents": True,
         "model_can_register_or_import_signoff_policy": False,

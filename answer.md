@@ -1,13 +1,20 @@
-# feedback.md 조치 결과
+# feedback.md 조치 결과 — historical snapshot
 
-- 작성일: 2026-09-02
-- 기준: 현재 `feedback.md`와 local working tree
+> **Historical response record.** 이 문서는 특정 피드백에 대한 당시 조치 주장을 보존한다.
+> 현재 검증 결과나 capability의 권위 있는 출처가 아니다. 현재 기준은
+> [Current capability boundaries](docs/current-capability-boundaries.md), 후속 계획은
+> [upgrade_plan.md](upgrade_plan.md)를 사용한다.
+> 아래의 “현재”와 pass count는 모두 당시 local snapshot을 가리킨다. Exact commit SHA가 기록되지
+> 않았으므로 release evidence로 사용할 수 없다.
+
+- 당시 작성일: 2026-09-02
+- 당시 기준: `feedback.md`와 local working tree (exact commit SHA 미기록)
 - 범위: 즉시 재현 가능한 workflow 무결성·측정 안전·운영 복구 문제
-- 최종 회귀: `644 passed, 0 skipped, 1 upstream warning`; compileall passed
+- 당시 회귀 주장: `644 passed, 0 skipped, 1 upstream warning`; compileall passed
 - Kelvin final GDS 보존 SHA-256:
   `7819CC1887FF07A8DB3C54FCB91EE9A695AB6326457F895369234F0CE6E45220`
 
-현재 구현은 generic/nonproduction drawing과 layout-bound persistent evidence workflow다.
+당시 구현은 generic/nonproduction drawing과 layout-bound persistent evidence workflow였다.
 Foundry device-monitoring/PCM E2E 또는 production release system이라고 주장하지 않는다.
 
 ## 이번에 반영한 항목

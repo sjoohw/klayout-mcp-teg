@@ -162,7 +162,7 @@ def test_route_clear_space_is_rechecked_against_process_table(tmp_path, ready_ph
     profile, primitive, request_plan = ready_phase1_inputs
     corrupted = copy.deepcopy(request_plan)
     for route in corrupted["routing_policy"]["m1_feasibility_report"]["routes"]:
-        route["clear_space_um"] = 0.1
+        route["clear_space_um"] = 0.05
     _refresh_route_fingerprint(corrupted)
 
     with pytest.raises(AnalysisError) as caught:
@@ -176,7 +176,7 @@ def test_route_clear_space_is_rechecked_against_process_table(tmp_path, ready_ph
         )
 
     assert caught.value.code == "ROUTE_CLEAR_SPACE_BELOW_PROCESS_RULE"
-    assert caught.value.details["required_clear_space_um"] == 0.3
+    assert caught.value.details["required_clear_space_um"] == 0.1
 
 
 def test_bounded_search_evidence_tamper_is_rejected(tmp_path, ready_phase1_inputs) -> None:

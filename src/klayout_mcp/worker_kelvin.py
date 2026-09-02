@@ -6,6 +6,11 @@ import tempfile
 import pya
 
 from .errors import AnalysisError
+from .file_publication import (
+    OutputAlreadyExistsError,
+    publication_staging_prefix,
+    publish_new_file,
+)
 from .kelvin_routing import (
     build_kelvin_geometry_dbu,
     build_kelvin_routing_spec,
@@ -163,12 +168,13 @@ def generate_kelvin_m1_teg(request):
             )
         )
 
-    temporary_output = os.path.join(
-        work_directory,
-        os.path.basename(output_path) + ".unverified.gds",
+    temporary_handle, temporary_output = tempfile.mkstemp(
+        prefix=publication_staging_prefix("kelvin"),
+        suffix=os.path.splitext(output_path)[1],
+        dir=os.path.dirname(output_path),
     )
-    if os.path.exists(temporary_output):
-        os.unlink(temporary_output)
+    os.close(temporary_handle)
+    os.unlink(temporary_output)
     try:
         layout.write(temporary_output)
         verify_layout, verify_top, verify_error = _load_layout_and_top(
@@ -351,20 +357,28 @@ def generate_kelvin_m1_teg(request):
         )
 
     try:
-        reservation = os.open(output_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(reservation)
-        os.replace(temporary_output, output_path)
+        publish_new_file(temporary_output, output_path)
+    except OutputAlreadyExistsError:
+        return _error(
+            "OUTPUT_ALREADY_EXISTS",
+            "Another writer published the Kelvin output first; its result was preserved.",
+            {"output_gds_path": output_path},
+            "Choose a new output path or reuse the existing winning artifact.",
+        )
     except Exception as exc:
-        if os.path.exists(temporary_output):
-            os.unlink(temporary_output)
-        if os.path.isfile(output_path) and os.path.getsize(output_path) == 0:
-            os.unlink(output_path)
         return _error(
             "KELVIN_OUTPUT_PROMOTION_FAILED",
             "Verified Kelvin output could not be promoted to its final path.",
-            {"output_gds_path": output_path, "error": str(exc)},
+            {
+                "output_gds_path": output_path,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
             "Check output permissions and choose a new path.",
         )
+    finally:
+        if os.path.exists(temporary_output):
+            os.unlink(temporary_output)
 
     return {
         "ok": True,

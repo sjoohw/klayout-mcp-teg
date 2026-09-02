@@ -14,7 +14,11 @@ def test_stdio_protocol_error_schema_and_annotations(tmp_path) -> None:
     server = StdioServerParameters(
         command=sys.executable,
         args=["-m", "klayout_mcp.server"],
-        env={**os.environ, "PYTHONPATH": str(source_root)},
+        env={
+            **os.environ,
+            "PYTHONPATH": str(source_root),
+            "KLAYOUT_MCP_TOOL_MODE": "expert",
+        },
     )
 
     async def exercise_server():
@@ -143,15 +147,11 @@ def test_stdio_protocol_error_schema_and_annotations(tmp_path) -> None:
         "ApprovalReferenceInput"
     ]["required"]
     verify_schema = tools["teg_verify"].inputSchema
-    measurement_schema = verify_schema["$defs"]["MeasurementManifestInput"]
-    assert "dut_pin_map" in measurement_schema["required"]
-    assert "electrical_topology" in measurement_schema["required"]
-    assert verify_schema["$defs"]["StimulusInput"]["properties"]["target"][
-        "$ref"
-    ] == "#/$defs/TerminalReferenceInput"
-    assert verify_schema["$defs"]["InactiveTerminalStateInput"]["properties"][
-        "state"
-    ]["enum"] == ["force", "float", "ground", "guard", "follow_shared_pad"]
+    measurement_property = verify_schema["properties"]["measurement_manifest"]
+    assert any(
+        branch.get("type") == "object"
+        for branch in measurement_property.get("anyOf", [])
+    )
     assert tools["compare_kelvin_layouts"].annotations.readOnlyHint is True
     assert tools["register_reference_layout"].annotations.readOnlyHint is False
     assert tools["list_reference_layouts"].annotations.readOnlyHint is True

@@ -1,4 +1,4 @@
-"""Deterministic geometry generator and parameter schema for DUT transistor arrays."""
+"""Deterministic conceptual/nonproduction DUT transistor-array scaffold."""
 
 from __future__ import annotations
 

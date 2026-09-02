@@ -9,6 +9,11 @@ import pya
 from .drc_guardrails import analyze_m1_connectivity
 from .dut_geometry import DutParameters, build_dut_geometry
 from .errors import AnalysisError
+from .file_publication import (
+    OutputAlreadyExistsError,
+    publication_staging_prefix,
+    publish_new_file,
+)
 from .geometry import Box
 from .worker_common import _box_um, _find_layer, _select_top
 from .worker_padset import analyze_padset
@@ -236,7 +241,7 @@ def assemble_teg(request):
     # 5. Write to a temporary sibling, verify, then promote without replacing
     # any pre-existing user artifact.
     temp_handle, temporary_output = tempfile.mkstemp(
-        prefix=".klayout-assembly-",
+        prefix=publication_staging_prefix("assembly"),
         suffix=".gds",
         dir=output_dir,
     )
@@ -378,37 +383,29 @@ def assemble_teg(request):
             "Inspect text construction and GDS serialization before exporting again.",
         )
 
-    reservation = None
     try:
-        reservation = os.open(
-            output_gds_path,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-        )
-        os.close(reservation)
-        reservation = None
-        os.replace(temporary_output, output_gds_path)
-    except FileExistsError:
-        if os.path.exists(temporary_output):
-            os.unlink(temporary_output)
+        publish_new_file(temporary_output, output_gds_path)
+    except OutputAlreadyExistsError:
         return _error(
             "OUTPUT_ALREADY_EXISTS",
-            "Assembly output appeared during generation and was not overwritten.",
+            "Another writer published the assembly output first; its result was preserved.",
             {"output_gds_path": output_gds_path},
-            "Choose a new output path.",
+            "Choose a new output path or reuse the existing winning artifact.",
         )
     except Exception as exc:
-        if reservation is not None:
-            os.close(reservation)
-        if os.path.exists(temporary_output):
-            os.unlink(temporary_output)
-        if os.path.isfile(output_gds_path) and os.path.getsize(output_gds_path) == 0:
-            os.unlink(output_gds_path)
         return _error(
             "ASSEMBLY_PROMOTION_FAILED",
             "Verified assembly could not be promoted to the requested output path.",
-            {"output_gds_path": output_gds_path, "error": str(exc)},
+            {
+                "output_gds_path": output_gds_path,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
             "Check output permissions and retry with a new path.",
         )
+    finally:
+        if os.path.exists(temporary_output):
+            os.unlink(temporary_output)
 
     unresolved_landings = analysis.get("m1_connectivity", {}).get(
         "unresolved_landings", []

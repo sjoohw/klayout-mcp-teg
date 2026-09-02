@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import time
 from typing import Any, Iterable, Mapping, Sequence
 
 from .errors import AnalysisError
@@ -139,6 +140,8 @@ def analyze_first_metal_feasibility(
     boundary_um: Sequence[float],
     obstacles_um: Iterable[Sequence[float]] = (),
     max_candidates_per_connection: int = 96,
+    max_search_nodes: int = 100_000,
+    max_search_seconds: float = 10.0,
 ) -> dict[str, Any]:
     """Find non-conflicting zero/one/two-bend routes using a finite critical-track set.
 
@@ -158,6 +161,25 @@ def analyze_first_metal_feasibility(
             message="max_candidates_per_connection must be a positive integer.",
             details={"max_candidates_per_connection": max_candidates_per_connection},
             next_action="Provide a positive bounded-search candidate limit.",
+        )
+    if isinstance(max_search_nodes, bool) or not isinstance(max_search_nodes, int) or max_search_nodes < 1:
+        raise AnalysisError(
+            code="INVALID_M1_FEASIBILITY_INPUT",
+            message="max_search_nodes must be a positive integer.",
+            details={"field": "max_search_nodes", "value": max_search_nodes},
+            next_action="Provide a finite positive global DFS node budget.",
+        )
+    if (
+        isinstance(max_search_seconds, bool)
+        or not isinstance(max_search_seconds, (int, float))
+        or not math.isfinite(float(max_search_seconds))
+        or float(max_search_seconds) <= 0
+    ):
+        raise AnalysisError(
+            code="INVALID_M1_FEASIBILITY_INPUT",
+            message="max_search_seconds must be finite and positive.",
+            details={"field": "max_search_seconds", "value": max_search_seconds},
+            next_action="Provide a finite positive global wall-time budget.",
         )
 
     requests: list[_RouteRequest] = []
@@ -369,7 +391,10 @@ def analyze_first_metal_feasibility(
         "compatibility_rejections": 0,
         "backtracks": 0,
         "disconnected_complete_assignments": 0,
+        "budget_exhausted": False,
+        "termination_reason": None,
     }
+    search_started = time.monotonic()
 
     def compatible(index: int, candidate: dict[str, Any]) -> bool:
         request = requests[index]
@@ -411,6 +436,14 @@ def analyze_first_metal_feasibility(
         return counts
 
     def search(position: int) -> bool:
+        if search_stats["nodes_visited"] >= max_search_nodes:
+            search_stats["budget_exhausted"] = True
+            search_stats["termination_reason"] = "max_search_nodes"
+            return False
+        if time.monotonic() - search_started >= float(max_search_seconds):
+            search_stats["budget_exhausted"] = True
+            search_stats["termination_reason"] = "max_search_seconds"
+            return False
         search_stats["nodes_visited"] += 1
         if position == len(order):
             connected = all(
@@ -428,6 +461,8 @@ def analyze_first_metal_feasibility(
             if search(position + 1):
                 return True
             selected.pop(index, None)
+            if search_stats["budget_exhausted"]:
+                return False
             search_stats["backtracks"] += 1
         return False
 
@@ -462,7 +497,17 @@ def analyze_first_metal_feasibility(
         for item in candidate_evidence
         if item["retained_candidate_count"] == 0
     ]
-    if not feasible and not blockers:
+    if search_stats["budget_exhausted"]:
+        blockers.append(
+            {
+                "reason": "global_search_budget_exhausted",
+                "termination_reason": search_stats["termination_reason"],
+                "nodes_visited": search_stats["nodes_visited"],
+                "max_search_nodes": max_search_nodes,
+                "max_search_seconds": float(max_search_seconds),
+            }
+        )
+    elif not feasible and not blockers:
         blockers.append(
             {
                 "reason": "no_mutually_compatible_route_assignment_within_retained_candidates",
@@ -495,11 +540,19 @@ def analyze_first_metal_feasibility(
         ],
         "search_order": [connection_ids[index] for index in order],
         "max_candidates_per_connection": max_candidates_per_connection,
+        "max_search_nodes": max_search_nodes,
+        "max_search_seconds": float(max_search_seconds),
         "candidate_evidence": candidate_evidence,
         "search_stats": search_stats,
     }
     return {
-        "status": "feasible_on_first_metal" if feasible else "not_found_bounded_search",
+        "status": (
+            "feasible_on_first_metal"
+            if feasible
+            else "search_budget_exhausted"
+            if search_stats["budget_exhausted"]
+            else "not_found_bounded_search"
+        ),
         "feasible": bool(feasible),
         "boundary_um": list(boundary),
         "obstacle_count": len(obstacles),
@@ -511,6 +564,8 @@ def analyze_first_metal_feasibility(
             "max_generated_bends_excluding_explicit_preferred": 2,
             "explicit_preferred_waypoints_are_user_supplied": True,
             "max_candidates_per_connection": max_candidates_per_connection,
+            "max_search_nodes": max_search_nodes,
+            "max_search_seconds": float(max_search_seconds),
             "candidate_order": "preferred_then_length_then_point_count_then_lexicographic",
             "critical_x_tracks_um": x_tracks,
             "critical_y_tracks_um": y_tracks,
@@ -527,7 +582,9 @@ def analyze_first_metal_feasibility(
         "search_evidence": evidence_payload,
         "search_order": [connection_ids[index] for index in order],
         "search_stats": search_stats,
-        "retained_candidate_space_exhausted": bool(not feasible),
+        "retained_candidate_space_exhausted": bool(
+            not feasible and not search_stats["budget_exhausted"]
+        ),
         "candidate_cap_truncated": any_truncated,
         "search_scope_is_universal_m1_proof": False,
         "failure_proves_m1_impossible": False,

@@ -2,19 +2,20 @@
 
 이 문서는 목표별 실행 순서와 profile 사용법을 설명한다. 공통 안전 계약과 production
 조건은 [contracts-and-production.md](contracts-and-production.md), 내부 구조와 테스트는
-[development.md](development.md)를 참고한다.
+[development.md](development.md)를 참고한다. 목표 계약과 현재 구현을 구분한 권위 있는 요약은
+[current-capability-boundaries.md](current-capability-boundaries.md)다.
 
 ## 목표별 경로
 
 | 목표 | 시작점 | stock checkout | 결과 |
 |---|---|---|---|
 | 기존 GDS/OAS 확인 | `inspect_layout`, `compare_layouts` | 지원 | 입력 불변 inventory/XOR |
-| 기존 GDS/OAS style 관측 | `extract_layout_style` | 지원 | content-addressed JSON profile |
+| 기존 GDS/OAS style 관측 | `extract_layout_style` | 지원 | source/profile hash를 포함한 JSON profile |
 | 명시적 직교 도형 생성 | `draw_manhattan_layout` | 지원 | 새 nonproduction GDS/OAS |
 | Kelvin reference 재현 | Kelvin 전용 plan/generate/compare | 지원 | 6-split nonproduction GDS |
-| 선택한 box 한 개를 PCell화하고 split batch 생성 | PCellizer workflow | 제한 지원 | one-parameter, hierarchy-preserving batch |
+| Non-array occurrence의 direct box 한 축을 resize한 static split GDS 생성 | PCellizer workflow | 제한 지원 | one parameter, row별 standalone GDS; reusable PCell 아님 |
 | Node별 reference 관리 | Reference Library workflow | 지원 | immutable reference selection |
-| Persistent job | `teg_intake` | 지원 | content-addressed draft/job |
+| Persistent job | `teg_intake` | 제한 지원 | Stock은 bundled research-only Kelvin resistor profile/version만 지원 |
 | Persistent plan/generate/verify | 4-call facade | host 통합 필요 | resumable evidence chain |
 | Foundry sign-off/PCM release | 조직 workflow | 미지원 | 외부 PDK/deck/probe 계약 필요 |
 
@@ -22,22 +23,30 @@
 
 `KLAYOUT_MCP_TOOL_MODE`로 LLM에 노출되는 도구 수를 줄일 수 있다.
 
-| Mode | 공개 도구 | 용도 |
-|---|---:|---|
-| `expert` | 56 | 전체 기능. 기본값이지만 복합 작업에만 권장 |
-| `facade` | 6 | `server_status`와 persistent 4-call/status |
-| `drawing` | 7 | 범용 draw/inspect/style/compare와 mesh/contact planner |
+| Mode | 공개 범위 | 용도 |
+|---|---|---|
+| `expert` | 등록된 전체 surface | Conceptual, incomplete Phase 1과 runnable tool을 구분할 수 있는 개발자/operator 전용 |
+| `facade` | Persistent facade | `server_status`와 persistent 4-call/status; stock은 `teg_plan`에서 planning 전 fail-closed |
+| `drawing` | 범용 drawing surface | 범용 draw/inspect/style/compare와 standalone mesh/contact planner; Phase 1 없음 |
+| `onboarding` | Pad/DUT example onboarding | Immutable pad macro, labeled DUT corpus, variation resolution, holdout score와 candidate package |
 
 잘못된 mode는 `expert`로 fallback하지 않고 시작 시 실패한다.
 `server_status.tool_surface.active_tools`, `capabilities`, `recommended_entrypoints`와
 `persistent_facade.tools`는 선택한 mode에 맞게 filter된다. 실제 호출 가능 목록은 MCP
 `tools/list`와 동일해야 하며 regression test가 이를 확인한다.
-작은 모델은 persistent E2E에 `facade`, 범용 geometry에 `drawing`을 먼저 사용한다. 여러 profile,
+환경변수를 생략하면 `drawing`이 기본이다. 작은 모델은 persistent E2E에 `facade`, 범용 geometry에
+`drawing`, Pad/DUT 등록에 `onboarding`을 사용한다. 여러 profile,
 PCellizer와 reference library를 한 세션에서 함께 골라야 할 때만 `expert`가 적합하다.
+도구 수는 release마다 달라질 수 있으므로 숫자를 capability로 사용하지 않고 MCP `tools/list`를
+권위 있는 surface로 사용한다.
+Mode는 tool schema/list만 줄이고 현재 server instruction은 공통이다. 따라서 작은 모델 권장은
+검증 완료 주장이 아니라 context 부담을 줄이는 운영 지침이다.
 
 ## Generic Manhattan drawing
 
-명시적 DBU, layer map, cell과 operation을 한 번에 전달한다. Output은 반드시 새 경로다.
+명시적 DBU, layer map, cell과 operation을 한 번에 전달한다. Output은 반드시 새 경로다. 이미
+존재하는 target은 보존된다. 같은 local target의 동시 writer는 create-only publish를 사용하므로
+정확히 하나만 성공하고 loser는 winner를 덮어쓰거나 삭제하지 않은 채 `OUTPUT_ALREADY_EXISTS`를 반환한다.
 
 ```json
 {
@@ -63,11 +72,17 @@ fresh layout에서 다시 확인되고 `production_ready=false`인 것이다.
 
 ## Persistent 4-call workflow
 
-Host가 trusted approval verifier와 해당 process engine을 주입한 경우의 순서는 다음과 같다.
+Host가 trusted approval verifier를 주입하고 선택 profile에 matching engine이 등록된 경우의 순서는
+다음과 같다. Bundled research Kelvin engine은 stock에 등록돼 있지만 verifier는 없다. 임의 target에는
+provider와 profile별 engine을 추가해야 한다.
 
 ```text
 teg_intake → teg_plan → teg_generate → teg_verify
 ```
+
+불완전한 intake는 immutable draft revision으로 저장되고 `draft_id`, revision, content-bound
+`resume_token`을 반환한다. 단순 검사만 원하면 `validate_only=true`를 사용하며 이 경우 draft/job을
+쓰지 않는다. 오류는 field path, 받은 값, 기대 조건, 이유와 다음 수정법을 포함한다.
 
 Stock server는 `approval_verifier=None`, `production_mode=True`이므로 `teg_intake` 이후
 `APPROVAL_BACKEND_UNAVAILABLE`로 중단되는 것이 정상이다. LLM이 approval reference를
@@ -107,12 +122,16 @@ tester program이나 sign-off를 의미하지 않는다. 예제 verifier는 prod
 timing/environment/safety와 exact multiplicity까지 승인 intent와 대조한다.
 
 Generation engine은 unique staging stream을 만들고 검증 결과와 hash를 `generation_staged`에 먼저
-저장한다. Final은 target directory의 sibling temp를 거쳐 atomic replace된다. Staging 직후,
+저장한다. Final은 target directory의 sibling temp를 거쳐 replace된다. 이는 한 writer의 partial
+target을 줄이지만 create-only concurrent commit을 증명하지 않는다. 같은 job/output에 대한 여러
+agent/process 호출은 외부에서 직렬화해야 한다. Staging 직후,
 final 기록 직후 또는 `drawing_complete` 이후 중단되면 동일 approval과 exact filename으로
 `teg_generate`를 재호출한다. 저장된 layout/result hash를 확인해 generation engine을 재실행하지
 않고 다음 stage를 append한다.
 
-남은 E2E 공백은 실제 stdio `teg_*`와 host-injected component를 함께 사용한 process restart다.
+Bundled nonproduction Kelvin demo test의 남은 공백은 실제 stdio `teg_*`와 host-injected component를
+함께 사용한 process restart다. Target-production에는 verifier, process provider, profile별
+planning/generation engine, DRC/LVS/PEX execution runner/registry와 signoff policy도 추가로 없다.
 
 ## Kelvin M1 reference profile
 
@@ -138,6 +157,12 @@ Profile 계약:
 
 ## Direct-measurement Phase 1
 
+> **현재 상태: nonproduction contract scaffold.** Stock transistor 요청은 primitive 단계에서
+> `PROCESS_PRIMITIVE_ADAPTER_NOT_IMPLEMENTED`로 중단한다. 여기서 Pad는 입력 padset macro가 아니라
+> frame/count로 재합성한 단일-row geometry다. Feasibility와 composition은 고정 폭 centerline box를
+> 사용한다. 현재 route polyline은 multi-rail mesh compiler로 연결되었지만 실제 Pad macro 보존은
+> 별도 immutable pad-macro 경로에만 구현되어 있다.
+
 사용자가 process/Pad/DUT/terminal/bias/obstacle을 완전히 제공하지 않았다면 먼저
 `plan_direct_measurement_teg`로 질문을 닫는다. 이후 순서는 다음과 같다.
 
@@ -145,19 +170,23 @@ Profile 계약:
 process capability
 → intake/terminal mapping
 → optional DOE
-→ device primitive
-→ terminal route feasibility
-→ phase1 layout composition
-→ atomic generation/fresh reload
+→ resistor/MOM primitive 또는 외부에서 주입한 verified primitive
+  (stock transistor adapter 없음)
+→ synthetic-pad centerline route feasibility
+→ synthetic PAD_MESH + bounded multi-rail route-mesh composition
+→ create-only no-clobber generation/fresh reload
 ```
 
-First-metal routing이 불가능하면 single rail로 낮추지 않고 explicit multi-metal escalation을
-요청한다. 현재 여러 net의 mesh envelope를 동시에 최적화하는 전역 router는 없다.
+장거리 single rail 금지와 explicit multi-metal escalation은 **목표 acceptance contract**다. 현재
+Phase 1 composer는 이 계약을 만족하는 mesh route를 생성하지 않는다. 여러 net의 mesh envelope를
+동시에 최적화하는 전역 router도 없다. 따라서 `generate_phase1_direct_teg` 결과를 실제
+transistor/pad-macro/mesh E2E로 설명하면 안 된다.
 
 ## PCellizer
 
-목표는 복잡한 hierarchy를 flatten하지 않고 선택한 DUT occurrence를 parameterize해 CSV/Excel
-split table로 1개 또는 수십 개 GDS를 만드는 것이다.
+현재 목표는 복잡한 hierarchy를 flatten하지 않고 authoring-supported **non-array occurrence**의
+direct box 한 축을 parameter key 하나로 resize해 CSV/Excel row별 standalone nonproduction GDS를
+만드는 것이다. Reusable KLayout PCell declaration/library는 생성하지 않는다.
 
 ```text
 inventory_pcellizer_hierarchy
@@ -174,7 +203,8 @@ Snapshot은 source bytes, exact occurrence path, array member, transform와 neig
 hash로 묶는다. Batch는 hierarchy copy-on-write, duplicate variant reuse와 fresh reload를 사용한다.
 현재 recipe compiler는 직접 선택된 box 한 개와 parameter 한 개만 지원한다. W/L 의미를 자동
 추론하거나 두 parameter의 Cartesian product를 한 recipe로 컴파일하지 않는다. 일반화된 임의
-polygon PCell과 composite-DUT 자동 추론도 지원하지 않는다.
+polygon PCell과 composite-DUT 자동 추론도 지원하지 않는다. Inventory/snapshot은 array member를
+식별하지만 현재 batch writer는 array-member authoring을 거부한다.
 
 ## Reference Library
 
@@ -208,7 +238,8 @@ marker는 비차단 `REVIEW_NEEDED`로 남긴다. `REF_ACCEPTED`는 DRC-clean이
 Layer role은 supplied layermap에서만 붙이고 geometry나 display color로 추측하지 않는다. 관측된
 치수는 reference의 drawing 관행이지 design-rule minimum/maximum이 아니다. Net, terminal,
 electrical performance와 DRC waiver도 추론하지 않는다. JSON profile은 source GDS SHA-256과 profile
-SHA-256을 포함하며 기존 파일을 덮어쓰지 않는다.
+SHA-256을 포함한다. 단일 호출은 기존 target을 거부하지만 same-target concurrent writer는 지원하지
+않으므로 서로 다른 output path를 사용하거나 외부에서 직렬화해야 한다.
 
 Portable example은
 `examples/style-profiles/sln001_kelvin_style.json`에 있고 source GDS와 layermap은 각각

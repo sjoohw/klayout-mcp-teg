@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .errors import AnalysisError
+from .file_publication import (
+    OutputAlreadyExistsError,
+    publication_staging_prefix,
+    publish_new_directory,
+    publish_new_file,
+)
 from .pcellizer_contract import normalize_occurrence_path
 from .workflow_manifest import canonical_json_bytes, canonical_sha256, immutable_json_copy
 
@@ -109,20 +115,38 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = canonical_json_bytes(value)
     handle, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        prefix=publication_staging_prefix("reference-json"), suffix=".tmp", dir=path.parent
     )
     try:
         with os.fdopen(handle, "wb") as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary_name, path)
-    except Exception:
+        try:
+            publish_new_file(temporary_name, path)
+        except OutputAlreadyExistsError:
+            try:
+                existing = path.read_bytes()
+            except OSError as exc:
+                _fail(
+                    "REFERENCE_DOCUMENT_READ_FAILED",
+                    "A concurrently published reference document could not be read.",
+                    next_action="Check the reference-library filesystem and retry.",
+                    path=str(path),
+                    error_type=type(exc).__name__,
+                )
+            if existing != data:
+                _fail(
+                    "REFERENCE_DOCUMENT_CONFLICT",
+                    "A concurrent writer published different reference document content.",
+                    next_action="Create a new immutable view or decision instead of replacing the winner.",
+                    path=str(path),
+                )
+    finally:
         try:
             os.unlink(temporary_name)
-        except OSError:
+        except FileNotFoundError:
             pass
-        raise
 
 
 def _bbox(value: Any, *, field: str) -> list[float]:
@@ -446,9 +470,13 @@ class ReferenceLibrary:
             "flattening_performed": False,
         }
         manifest = {**asset_core, "asset_manifest_sha256": canonical_sha256(asset_core)}
-        staging_root = self.root / ".staging"
-        staging_root.mkdir(parents=True, exist_ok=True)
-        staging_dir = Path(tempfile.mkdtemp(prefix="reference-", dir=staging_root))
+        final_dir.parent.mkdir(parents=True, exist_ok=True)
+        staging_dir = Path(
+            tempfile.mkdtemp(
+                prefix=publication_staging_prefix("reference", directory=True),
+                dir=final_dir.parent,
+            )
+        )
         try:
             shutil.copyfile(source, staging_dir / f"source{suffix}")
             if _file_sha256(staging_dir / f"source{suffix}") != source_hash:
@@ -458,12 +486,9 @@ class ReferenceLibrary:
                     next_action="Check the filesystem and register again.",
                 )
             _atomic_json(staging_dir / "asset.json", manifest)
-            final_dir.parent.mkdir(parents=True, exist_ok=True)
             try:
-                os.replace(staging_dir, final_dir)
-            except OSError:
-                if not final_dir.is_dir():
-                    raise
+                publish_new_directory(staging_dir, final_dir)
+            except OutputAlreadyExistsError:
                 shutil.rmtree(staging_dir)
         except Exception:
             if staging_dir.exists():

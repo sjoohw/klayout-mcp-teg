@@ -1,4 +1,7 @@
-"""Compose verified DUT-local primitives, 25 Pads, and M1 routes into one drawing request."""
+"""Compose injected primitives, synthetic PAD_MESH cells, and routed M1 mesh geometry.
+
+Real pad-macro preservation is provided by the separate immutable pad-macro overlay path.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +14,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from .errors import AnalysisError
 from .manhattan_drawing import build_manhattan_drawing_plan
+from .mesh_routing import synthesize_mesh_polyline
 from .process_capability import required_metal_space_um, validate_process_capability
 from .primitive_verification import geometry_fingerprint, terminal_component_manifest
 
@@ -81,6 +85,29 @@ def _route_boxes(points: Sequence[Sequence[float]], width_um: float) -> list[lis
             ]
         )
     return boxes
+
+
+def _mesh_segment_corridors(
+    points: Sequence[Sequence[float]],
+    envelope_width_um: float,
+) -> list[list[float]]:
+    half = envelope_width_um / 2.0
+    corridors = []
+    for first, second in zip(points, points[1:]):
+        x1, y1 = float(first[0]), float(first[1])
+        x2, y2 = float(second[0]), float(second[1])
+        if x1 == x2 and y1 != y2:
+            corridors.append([_q(x1 - half), _q(min(y1, y2) - half), _q(x1 + half), _q(max(y1, y2) + half)])
+        elif y1 == y2 and x1 != x2:
+            corridors.append([_q(min(x1, x2) - half), _q(y1 - half), _q(max(x1, x2) + half), _q(y1 + half)])
+        else:
+            raise AnalysisError(
+                code="NON_ORTHOGONAL_ROUTING_FORBIDDEN",
+                message="Mesh corridors require non-zero Manhattan route segments.",
+                details={"first": list(first), "second": list(second)},
+                next_action="Regenerate the verified Manhattan route polyline.",
+            )
+    return corridors
 
 
 def _add_pad_mesh(
@@ -470,19 +497,36 @@ def compose_phase1_direct_layout(
                 next_action="Keep route net and terminal assignment net identical.",
             )
         route_width = float(route["width_um"])
-        if route_width < float(first_metal["min_width_um"]) or (
-            maximum is not None and route_width > float(maximum)
+        mesh_rail_width = float(route.get("mesh_rail_width_um", first_metal["min_width_um"]))
+        mesh_rail_space = float(
+            route.get(
+                "mesh_rail_space_um",
+                required_metal_space_um(
+                    first_metal,
+                    width_um=mesh_rail_width,
+                    parallel_length_um=max(frame_width, frame_height),
+                ),
+            )
+        )
+        minimum_mesh_envelope = 2.0 * mesh_rail_width + mesh_rail_space
+        if (
+            mesh_rail_width < float(first_metal["min_width_um"])
+            or (maximum is not None and mesh_rail_width > float(maximum))
+            or route_width + 1e-12 < minimum_mesh_envelope
         ):
             raise AnalysisError(
                 code="ROUTE_WIDTH_OUTSIDE_PROCESS_PROFILE",
-                message="A first-metal route width is outside the declared process profile.",
+                message="A route mesh rail or verified envelope is outside the declared process profile.",
                 details={
                     "connection_id": route["connection_id"],
-                    "width_um": route_width,
+                    "mesh_envelope_width_um": route_width,
+                    "mesh_rail_width_um": mesh_rail_width,
+                    "mesh_rail_space_um": mesh_rail_space,
+                    "minimum_mesh_envelope_um": minimum_mesh_envelope,
                     "min_width_um": first_metal["min_width_um"],
                     "profile_max_width_um": maximum,
                 },
-                next_action="Regenerate routing with a process-legal first-metal width.",
+                next_action="Regenerate routing with a process-legal multi-rail mesh envelope.",
             )
         instance = instance_by_dut[dut]
         local_terminal = instance["primitive"]["terminals_um"].get(terminal)
@@ -510,7 +554,22 @@ def compose_phase1_direct_layout(
                 details={"dut": dut, "terminal": terminal, "terminal_point_um": terminal_point, "pad_point_um": pad_point, "route_points_um": route["points_um"]},
                 next_action="Regenerate the route from the placed terminal to its assigned Pad center.",
             )
-        boxes = _route_boxes(route["points_um"], float(route["width_um"]))
+        boxes = _route_boxes(route["points_um"], route_width)
+        mesh = synthesize_mesh_polyline(
+            dbu_um=float(process["dbu_um"]),
+            points_um=route["points_um"],
+            segment_corridors_um=_mesh_segment_corridors(route["points_um"], route_width),
+            rail_width_um=mesh_rail_width,
+            rail_space_um=mesh_rail_space,
+            landing_span_um=float(route.get("landing_span_um", mesh_rail_width)),
+            cross_tie_pitch_um=max(
+                mesh_rail_width + mesh_rail_space,
+                10.0 * (mesh_rail_width + mesh_rail_space),
+            ),
+            cell=top_cell,
+            layer_role=first_metal_role,
+        )
+        mesh_boxes = [operation["bbox_um"] for operation in mesh["operations"]]
         local_m1_boxes = [
             operation["bbox_um"]
             for operation in instance["primitive"]["operations"]
@@ -519,7 +578,7 @@ def compose_phase1_direct_layout(
         component_by_box = instance["terminal_components"]["component_id_by_box_index"]
         touched_components = {
             component_by_box[box_index]
-            for box in boxes
+            for box in mesh_boxes
             for box_index, local_box in enumerate(local_m1_boxes)
             if _bbox_intersects(
                 box,
@@ -558,7 +617,7 @@ def compose_phase1_direct_layout(
         )
         required_route_space = required_metal_space_um(
             first_metal,
-            width_um=float(route["width_um"]),
+            width_um=mesh_rail_width,
             parallel_length_um=longest_parallel_segment,
         )
         if float(route["clear_space_um"]) + 1e-12 < required_route_space:
@@ -589,10 +648,7 @@ def compose_phase1_direct_layout(
                     details={"connection_id": route["connection_id"], "other_dut": other_dut},
                     next_action="Add other DUT bboxes as first-metal obstacles and reroute.",
                 )
-        for box in boxes:
-            route_operations.append(
-                {"type": "add_box", "cell": top_cell, "layer": first_metal_role, "bbox_um": box}
-            )
+        route_operations.extend(mesh["operations"])
         terminal_manifest.append(
             {
                 "dut": dut,
@@ -605,6 +661,8 @@ def compose_phase1_direct_layout(
                 "primitive_terminal_component_id": expected_component,
                 "route_touched_component_ids": sorted(touched_components),
                 "positive_area_terminal_overlap_verified": True,
+                "route_geometry_kind": "connected_multi_segment_low_resistance_mesh",
+                "mesh_synthesis_evidence": mesh["evidence"],
             }
         )
 
@@ -684,6 +742,8 @@ def compose_phase1_direct_layout(
             "fresh_reload_geometry_equivalence_required": True,
         },
         "first_metal_route_fingerprint_sha256": route_report.get("route_fingerprint_sha256"),
+        "dut_to_pad_mesh_compiler_integrated": True,
+        "single_rail_route_fallback_allowed": False,
         "first_metal_search_evidence_fingerprint_sha256": route_report.get(
             "search_evidence_fingerprint_sha256"
         ),

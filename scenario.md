@@ -8,6 +8,9 @@ Fabrication process profile은 번들하지 않으며, 타깃 환경은 [onboard
 > foundry sign-off, tape-out, PCM release, 전기적 성능 또는 auto-prober 실행을 의미하지 않는다.
 > DRC/LVS/PEX는 조직 정책이 선택할 수 있는 외부 evidence이며 범용 drawing의 필수 단계가 아니다.
 
+등록된 tool과 목표 계약을 현재 구현으로 오해하지 않으려면
+[Current capability boundaries](docs/current-capability-boundaries.md)를 먼저 확인한다.
+
 ## 지원 수준
 
 | 수준 | 의미 |
@@ -21,7 +24,7 @@ Fabrication process profile은 번들하지 않으며, 타깃 환경은 [onboard
 | Profile | 용도 | Frame / DBU | 주요 layer | 근거 수준 |
 |---|---|---|---|---|
 | `sln001_kelvin_reference_demo` | 6-split Kelvin 회귀 재현 | 2000×54 µm / 0.00025 µm | M1 `(15,0)` | 보존된 layout과의 deterministic regression reference |
-| 사용자 제공 profile | 실제 TEG drawing | onboarding 입력 | 사용자 승인 layermap | profile evidence와 조직 승인 범위 |
+| 사용자 제공 profile | Target drawing 후보; 외부 구현 필요 | onboarding 입력 | 사용자 승인 layermap | profile 선언만으로 adapter readiness가 되지 않음 |
 
 25개 40×40 µm Pad와 각 frame 크기는 해당 example의 계약일 뿐 표준 PCM, scribe 또는
 probe-card 규격이라는 뜻이 아니다. 실제 공정에는 승인된 layermap, pad macro와 scribe/probe
@@ -29,7 +32,7 @@ probe-card 규격이라는 뜻이 아니다. 실제 공정에는 승인된 layer
 
 ## 시나리오 A — 실제 타깃 공정 온보딩
 
-**지원 수준: 조건부 가능**
+**지원 수준: Stock 미지원; process-specific host 구현이 있을 때만 조건부 가능**
 
 MCP는 내장 공정값을 제공하지 않는다. 타깃 LLM은 다음 순서를 따른다.
 
@@ -46,6 +49,10 @@ describe_pdk_profile_inputs
 Unknown layer/rule/device geometry는 추정하지 않는다. Frame 2000×54 µm 전후, 25개 40×40 µm Pad,
 first-metal 우선과 direct measurement는 조직 기본값 후보이며 PDK 사실이 아니다. Transistor는
 타깃 공정 adapter가 준비되기 전에는 geometry 생성을 시작하지 않는다.
+
+여기서 필요한 host 구현에는 실제 transistor primitive adapter, pad macro hierarchy/stack을 보존하는
+composer, bounded mesh-aware global router와 foundry verification runner가 포함된다. Profile JSON과
+reference GDS를 제공하는 것만으로 이 구현이 생기지 않는다.
 
 ## 시나리오 B — SLN001 Kelvin 6-split 재현과 XOR
 
@@ -122,14 +129,19 @@ process model이 없으므로 목표 Ω/fF를 치수로 합성하거나 전기�
 teg_intake → teg_plan → teg_generate → teg_verify
 ```
 
-`teg_intake`와 durable job 저장은 stock에서 가능하다. Plan 이후에는 trusted approval verifier와
-해당 process generation engine을 host가 주입해야 한다. MeasurementManifest는 exact layout hash에
+`teg_intake`와 durable job 저장은 stock에서 가능하다. Bundled Kelvin planning/generation engine은
+등록돼 있지만 trusted approval verifier가 없어 `teg_plan`의 planning 전에 중단된다. 임의 target이나
+production profile은 verifier 외에도 matching provider, engine, runner와 policy를 host가 주입해야 한다.
+MeasurementManifest는 exact layout hash에
 DUT→terminal→net→Pad→probe pin→instrument channel과 stimulus/safety semantics를 묶지만 tester
 program이 아니다. Keysight/Cascade exporter, instrument driver, calibration/de-embedding 실행과
 wafer traceability는 현재 repository에 없다.
 
 ## 현재 Roadmap
 
+- 실제 transistor primitive adapter와 production registry.
+- 실제 pad macro hierarchy/stack 보존형 composition.
+- Bounded 21-DUT global mesh routing과 Phase 1 통합.
 - 임의 hierarchy/composite DUT의 multi-parameter PCell 자동 추론.
 - 승인된 process electrical model을 사용한 target R/C synthesis.
 - 조직별 DRC/LVS/PEX adapter와 waiver authority 연결.

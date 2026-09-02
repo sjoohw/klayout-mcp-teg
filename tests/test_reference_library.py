@@ -1,9 +1,13 @@
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import json
+import threading
 
 import pytest
 
 from klayout_mcp.errors import AnalysisError
 import klayout_mcp.server as server_module
+import klayout_mcp.reference_library as reference_library_module
 from klayout_mcp.reference_library import (
     ReferenceLibrary,
     load_reference_view_manifest,
@@ -113,6 +117,65 @@ def test_reference_asset_is_content_addressed_and_source_independent(tmp_path) -
     assert loaded["source_geometry_modified"] is False
     assert loaded["flattening_performed"] is False
     assert open(loaded["source"]["stored_path"], "rb").read() == b"stable-reference-gds"
+
+
+def test_reference_asset_concurrent_same_content_directory_publish_is_idempotent(
+    tmp_path,
+) -> None:
+    source = tmp_path / "source.gds"
+    source.write_bytes(b"stable-reference-gds")
+    library = ReferenceLibrary(tmp_path / "library")
+    barrier = threading.Barrier(2)
+
+    def register() -> dict:
+        barrier.wait()
+        return library.register(
+            source_layout_path=str(source),
+            process_node="LN14LPU",
+            process_option="logic",
+            process_revision="r1",
+            inventory=_inventory(),
+            profile_name="internal",
+            profile_version="v7",
+            layermap_sha256="a" * 64,
+            purpose_tags=["mesh", "transistor"],
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: register(), range(2)))
+
+    assert results[0]["reference_id"] == results[1]["reference_id"]
+    assert library.load_asset(results[0]["reference_id"])["source"][
+        "layout_sha256"
+    ] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert list(
+        (tmp_path / "library" / "LN14LPU" / "assets").glob(
+            ".klayout-stage-dir-reference-*"
+        )
+    ) == []
+
+
+def test_reference_document_concurrent_publish_preserves_one_winner(tmp_path) -> None:
+    path = tmp_path / "library" / "view.json"
+    documents = ({"writer": 1}, {"writer": 2})
+    barrier = threading.Barrier(2)
+
+    def publish(document: dict) -> str:
+        barrier.wait()
+        try:
+            reference_library_module._atomic_json(path, document)
+        except AnalysisError as exc:
+            assert exc.code == "REFERENCE_DOCUMENT_CONFLICT"
+            return "conflict"
+        return "published"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(publish, documents))
+
+    assert outcomes.count("published") == 1
+    assert outcomes.count("conflict") == 1
+    assert json.loads(path.read_text(encoding="utf-8")) in documents
+    assert list(path.parent.glob(".view.json.*.tmp")) == []
 
 
 def test_list_reference_layouts_filters_process_node(tmp_path) -> None:

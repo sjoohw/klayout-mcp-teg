@@ -11,6 +11,7 @@ from klayout_mcp.server import (
     export_pcell_code,
     generate_dut_geometry,
     generate_phase1_direct_teg,
+    host_doctor,
     inspect_layout,
     inventory_pcellizer_hierarchy,
     create_pcellizer_snapshot,
@@ -64,6 +65,22 @@ def test_server_status() -> None:
 
     assert result["ok"] is True
     assert result["server"] == "klayout-teg-mcp"
+    assert result["tool_surface"]["expert_is_readiness_claim"] is False
+    assert result["tool_surface"]["mode_reduces_tools_not_common_instruction"] is True
+    assert "registration is not target-process readiness" in result["capabilities_semantics"]
+    assert result["known_limitations"] == {
+        "stock_classification": "generic_nonproduction_drawing_and_contract_framework",
+        "transistor_primitive_adapter": "not_implemented",
+        "conceptual_transistor_is_phase1_fallback": False,
+        "phase1_padset_import_or_preservation": "not_implemented",
+        "phase1_pad_geometry": "synthesized_from_frame_and_pad_count",
+        "phase1_dut_to_pad_route_geometry": "bounded_polyline_compiled_to_multi_rail_mesh",
+        "phase1_standalone_mesh_compiler_integrated": True,
+        "phase1_global_search_budget": "global_node_and_wall_time_budget_enforced",
+        "same_target_concurrent_writers_supported": True,
+        "generic_manhattan_same_target_no_clobber": True,
+        "exact_gemma4_qualified": False,
+    }
     assert result["capabilities"] == [
         "analyze_pad_boxes",
         "analyze_padset",
@@ -105,10 +122,18 @@ def test_server_status() -> None:
         "validate_process_capability_profile",
         "plan_metal_resistor_primitive",
         "plan_mom_capacitor_primitive",
-            "plan_phase1_terminal_routes",
-            "guide_phase1_direct_workflow",
-            "plan_phase1_direct_teg_layout",
+        "plan_phase1_terminal_routes",
+        "guide_phase1_direct_workflow",
+        "plan_phase1_direct_teg_layout",
         "generate_phase1_direct_teg",
+        "host_doctor",
+        "register_pad_macro",
+        "compose_registered_pad_macro",
+        "onboard_transistor_corpus",
+        "resolve_transistor_corpus",
+        "score_transistor_adapter",
+        "build_transistor_adapter_candidate",
+        "register_transistor_adapter_candidate",
         "teg_intake",
         "teg_status",
         "teg_plan",
@@ -154,18 +179,23 @@ def test_server_status() -> None:
     )
     assert result["approval_verifier_contract"]["backend_configured"] is False
     assert result["persistent_facade"]["default_approval_backend_configured"] is False
+    assert result["persistent_facade"]["target_production_transistor_engine_configured"] is False
+    assert result["persistent_facade"]["external_report_normalization_contract_available"] is True
+    assert result["persistent_facade"]["drc_lvs_pex_execution_runner_configured"] is False
     assert "fail closed" in result["persistent_facade"]["stock_execution_limit"]
     assert result["recommended_entrypoints"]["generic_nonproduction_drawing"] == [
         "draw_manhattan_layout"
     ]
-    assert result["recommended_entrypoints"]["host_integrated_persistent_job"] == [
+    assert result["recommended_entrypoints"]["stock_persistent_intake_or_status"] == [
         "teg_intake",
         "teg_status",
     ]
     assert result["approval_verifier_contract"]["default_behavior"] == "fail_closed"
     assert result["approval_verifier_contract"]["mcp_can_mint_approval"] is False
     assert result["workflow_store_contract"]["full_manifest_ancestry_revalidated"] is True
-    assert result["workflow_store_contract"]["incomplete_drafts_persisted"] is False
+    assert result["workflow_store_contract"]["incomplete_drafts_persisted"] is True
+    assert result["workflow_store_contract"]["validate_only_does_not_persist"] is True
+    assert result["external_verification_runner_contract"]["stock_runner_configured"] is False
     assert result["persistent_facade"]["default_approval_backend_configured"] is False
     assert result["external_evidence_contract"]["mock_evidence_can_reach_signoff"] is False
     assert (

@@ -18,6 +18,21 @@ class ProcessReferenceInput(TypedDict):
     capability_sha256: str
 
 
+class TechnologyAdapterIdentityInput(TypedDict):
+    technology: str
+    pdk_revision: str
+    adapter_kind: str
+    device_family: str
+    topology: str
+    package_version: str
+
+
+class TechnologyAdapterReferenceInput(TypedDict):
+    identity: TechnologyAdapterIdentityInput
+    package_sha256: str
+    registry_snapshot_sha256: str
+
+
 class FrameInput(TypedDict):
     width_um: float
     height_um: float
@@ -166,6 +181,7 @@ class DesignIntentDraftInput(TypedDict):
     verification_policy: VerificationPolicyInput
     output_policy: OutputPolicyInput
     unresolved_questions: list[str]
+    technology_adapter: NotRequired[TechnologyAdapterReferenceInput]
 
 
 class ApprovalReferenceInput(TypedDict):

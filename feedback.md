@@ -1,22 +1,29 @@
-# KLayout Drawing MCP 활성 피드백
+# KLayout Drawing MCP 활성 피드백 — historical snapshot
 
-- 재검토일: 2026-09-02
-- 검토 대상: `answer.md`의 조치 주장, 현재 `readme.md`/`docs/`, 구현 및 tests
+> **Historical review record.** 이 문서는 작성 당시 checkout과 주장에 대한 원문을 보존한다.
+> 현재 구현 상태로 갱신되는 문서가 아니며 일부 pass count·상태·동시성 결론은 이후 코드와 다르다.
+> 아래의 “현재”, “실제”, “이번 실행”은 모두 이 snapshot 작성 당시를 뜻한다. Exact commit SHA가
+> 기록되지 않았으므로 이 문서의 수치는 release evidence로 사용할 수 없다.
+> 현재 기준은 [Current capability boundaries](docs/current-capability-boundaries.md), 후속 계획은
+> [upgrade_plan.md](upgrade_plan.md)를 사용한다.
+
+- 당시 재검토일: 2026-09-02
+- 당시 검토 대상: `answer.md`의 조치 주장, 당시 `readme.md`/`docs/`, 구현 및 tests
 - 관점: foundry device monitoring/PCM, layout 작업자, LLM operator, persistent workflow 무결성
-- 관리 원칙: **해결된 과거 지적은 이 문서에서 제거하고, 현재 재현되는 문제와 미완료 계약만 기록한다.**
+- 당시 관리 원칙: **해결된 과거 지적은 제거하고, 그 snapshot에서 재현된 문제만 기록한다.**
 
-## 현재 판정
+## 당시 판정
 
 `answer.md`의 조치 주장을 구현과 테스트로 대조했고, 해결이 확인된 과거 지적은 이 문서에서
 제거했다. 아래에는 부분 해결, 미해결 또는 새로 재현된 항목만 남긴다.
 
-그러나 현재 구현은 여전히 **generic/nonproduction drawing 및 일부 persistent integrity workflow**다.
+그러나 당시 구현은 여전히 **generic/nonproduction drawing 및 일부 persistent integrity workflow**였다.
 `foundry production-ready` 또는 `device-monitoring/PCM E2E`라고 판정할 수 없다. 특히 코드가
 반환하는 `production_ready=true`는 문서에 적힌 production 완료 정의보다 훨씬 약하다.
 
-## 독립 검증 결과
+## 당시 독립 검증 결과
 
-전체 회귀를 다시 실행했다.
+당시 전체 회귀를 다시 실행했다.
 
 ```text
 command: uv run --extra dev pytest -q

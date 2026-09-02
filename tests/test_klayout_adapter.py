@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import subprocess
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -517,6 +519,57 @@ def test_boundary_overlay_does_not_overwrite_existing_artifact(tmp_path) -> None
     assert result["ok"] is False
     assert result["code"] == "OUTPUT_EXISTS"
     assert image_path.read_bytes() == b"keep"
+
+
+def test_boundary_overlay_concurrent_same_target_preserves_one_winner(tmp_path) -> None:
+    try:
+        executable = find_klayout_executable()
+    except Exception:
+        pytest.skip("KLayout executable is not installed")
+
+    layout_path = tmp_path / "overlay-race-padset.gds"
+    layermap = tmp_path / "layers.yaml"
+    image_path = tmp_path / "overlay-race.png"
+    fixture_script = Path(__file__).parent / "fixtures" / "create_synthetic_padset.py"
+    completed = subprocess.run(
+        [
+            str(executable),
+            "-b",
+            "-r",
+            str(fixture_script),
+            "-rd",
+            f"output_path={layout_path}",
+            "-rd",
+            "landing_routes=1",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    layermap.write_text("layers:\n  m1: [10, 2]\n", encoding="utf-8")
+    barrier = threading.Barrier(2)
+
+    def render() -> dict:
+        barrier.wait()
+        return render_boundary_overlay(
+            str(layout_path),
+            str(layermap),
+            str(image_path),
+            klayout_executable=str(executable),
+            image_width=800,
+            image_height=300,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: render(), range(2)))
+
+    assert sum(result["ok"] is True for result in results) == 1
+    loser = next(result for result in results if result["ok"] is False)
+    assert loser["code"] == "OUTPUT_EXISTS"
+    assert image_path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert list(tmp_path.glob(".klayout-stage-file-overlay-*.png")) == []
 
 
 def test_no_normalized_pad_candidates_is_structured(tmp_path, monkeypatch) -> None:

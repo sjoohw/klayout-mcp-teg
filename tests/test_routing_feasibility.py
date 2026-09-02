@@ -156,3 +156,51 @@ def test_candidate_cap_is_explicit_in_failure_evidence() -> None:
     assert result["candidate_cap_truncated"] is True
     assert result["search_configuration"]["max_candidates_per_connection"] == 1
     assert len(result["search_evidence_fingerprint_sha256"]) == 64
+
+
+def test_global_search_node_budget_stops_before_claiming_exhaustion() -> None:
+    result = analyze_first_metal_feasibility(
+        [
+            {**_connection("A", [1.0, 1.0], [9.0, 9.0]), "connection_id": "A"},
+            {**_connection("B", [1.0, 9.0], [9.0, 1.0]), "connection_id": "B"},
+        ],
+        boundary_um=[0.0, 0.0, 10.0, 10.0],
+        max_search_nodes=1,
+        max_search_seconds=10.0,
+    )
+
+    assert result["status"] == "search_budget_exhausted"
+    assert result["search_stats"]["budget_exhausted"] is True
+    assert result["retained_candidate_space_exhausted"] is False
+    assert result["failure_proves_m1_impossible"] is False
+
+
+def test_twenty_one_dut_four_terminal_parallel_case_is_bounded() -> None:
+    connections = []
+    for dut_index in range(21):
+        for terminal_index in range(4):
+            row = dut_index * 4 + terminal_index
+            y = 1.0 + row * 1.0
+            connections.append(
+                {
+                    "connection_id": f"D{dut_index + 1}:T{terminal_index + 1}",
+                    "net": f"N{row + 1}",
+                    "start_um": [1.0, y],
+                    "end_um": [99.0, y],
+                    "width_um": 0.3,
+                    "clear_space_um": 0.2,
+                }
+            )
+
+    result = analyze_first_metal_feasibility(
+        connections,
+        boundary_um=[0.0, 0.0, 100.0, 86.0],
+        max_candidates_per_connection=8,
+        max_search_nodes=10_000,
+        max_search_seconds=10.0,
+    )
+
+    assert result["feasible"] is True
+    assert result["connection_count"] == 84
+    assert result["search_stats"]["nodes_visited"] <= 85
+    assert result["search_stats"]["budget_exhausted"] is False

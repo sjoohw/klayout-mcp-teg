@@ -181,11 +181,23 @@ def synthesize_staged_mesh_segment(
         length = abs(end[0] - start[0])
         transverse_min = corridor[1] - start[1]
         transverse_max = corridor[3] - start[1]
+        longitudinal_min = (
+            corridor[0] - start[0] if direction == "+x" else start[0] - corridor[2]
+        )
+        longitudinal_max = (
+            corridor[2] - start[0] if direction == "+x" else start[0] - corridor[0]
+        )
     elif start[0] == end[0] and start[1] != end[1]:
         direction = "+y" if end[1] > start[1] else "-y"
         length = abs(end[1] - start[1])
         transverse_min = corridor[0] - start[0]
         transverse_max = corridor[2] - start[0]
+        longitudinal_min = (
+            corridor[1] - start[1] if direction == "+y" else start[1] - corridor[3]
+        )
+        longitudinal_max = (
+            corridor[3] - start[1] if direction == "+y" else start[1] - corridor[1]
+        )
     else:
         raise AnalysisError(
             code="NON_ORTHOGONAL_ROUTING_FORBIDDEN",
@@ -207,22 +219,6 @@ def synthesize_staged_mesh_segment(
         )
 
     pitch = rail_width + rail_space
-    half_low = rail_width // 2
-    half_high = rail_width - half_low
-    min_index = _ceil_div(transverse_min + half_low, pitch)
-    max_index = (transverse_max - half_high) // pitch
-    offsets = tuple(index * pitch for index in range(min_index, max_index + 1))
-    if not offsets or 0 not in offsets:
-        raise AnalysisError(
-            code="MESH_BASELINE_DOES_NOT_FIT",
-            message="The corridor cannot contain the baseline rail on the declared pitch grid.",
-            details={
-                "corridor_dbu": list(corridor),
-                "rail_width_dbu": rail_width,
-                "rail_space_dbu": rail_space,
-            },
-            next_action="Move the port baseline or enlarge the confirmed corridor.",
-        )
     if (
         isinstance(minimum_rail_count, bool)
         or not isinstance(minimum_rail_count, int)
@@ -233,6 +229,35 @@ def synthesize_staged_mesh_segment(
             message="minimum_rail_count must be an integer of at least two.",
             details={"minimum_rail_count": minimum_rail_count},
             next_action="Require at least two parallel rails for a hole-bearing mesh.",
+        )
+    half_low = rail_width // 2
+    half_high = rail_width - half_low
+    min_index = _ceil_div(transverse_min + half_low, pitch)
+    max_index = (transverse_max - half_high) // pitch
+    offsets = tuple(index * pitch for index in range(min_index, max_index + 1))
+    centerline_baseline_present = 0 in offsets
+    if len(offsets) < minimum_rail_count:
+        # A narrow symmetric envelope can hold an even pair around the port
+        # centerline even when it cannot hold baseline + two side rails.
+        shift = pitch // 2
+        shifted_min = _ceil_div(transverse_min + half_low + shift, pitch)
+        shifted_max = (transverse_max - half_high + shift) // pitch
+        shifted_offsets = tuple(
+            index * pitch - shift for index in range(shifted_min, shifted_max + 1)
+        )
+        if len(shifted_offsets) > len(offsets):
+            offsets = shifted_offsets
+            centerline_baseline_present = 0 in offsets
+    if not offsets:
+        raise AnalysisError(
+            code="MESH_BASELINE_DOES_NOT_FIT",
+            message="The corridor cannot contain a centered access rail set on the declared pitch grid.",
+            details={
+                "corridor_dbu": list(corridor),
+                "rail_width_dbu": rail_width,
+                "rail_space_dbu": rail_space,
+            },
+            next_action="Move the port baseline or enlarge the confirmed corridor.",
         )
     if len(offsets) < minimum_rail_count:
         raise AnalysisError(
@@ -247,8 +272,11 @@ def synthesize_staged_mesh_segment(
 
     start_distance_by_offset: dict[int, int] = {}
     effective_landing_span = max(landing_span, rail_width)
+    nearest_offset = min(abs(offset) for offset in offsets)
     for offset in offsets:
-        if offset == 0:
+        if offset == 0 or (
+            not centerline_baseline_present and abs(offset) == nearest_offset
+        ):
             # The persistent baseline is the terminal-access conductor.  A
             # narrower centered landing still has positive-area overlap; moving
             # this rail away from u=0 would create an electrical open.
@@ -295,7 +323,8 @@ def synthesize_staged_mesh_segment(
             )
         )
 
-    tie_distances = set(start_distance_by_offset.values()) - {0}
+    tie_distances = set(start_distance_by_offset.values())
+    tie_distances.add(0)
     if cross_tie_pitch_um is not None:
         tie_pitch = _positive_dbu(
             cross_tie_pitch_um, dbu_value, field="cross_tie_pitch_um"
@@ -314,10 +343,22 @@ def synthesize_staged_mesh_segment(
         ]
         if not active:
             continue
-        if distance == length and not receiving_tie_present:
-            # No receiving conductor exists beyond the endpoint. Keep the tie
-            # inside the confirmed corridor with its outer face flush to it.
-            u1, u2 = length - rail_width, length
+        if distance == 0:
+            # Straddle the exact terminal point so a route directed away from a
+            # landing still has positive-area conductor overlap when the
+            # verified corridor includes that landing-side extension.
+            u1, u2 = (
+                _centered_interval(0, rail_width)
+                if longitudinal_min <= -(rail_width // 2)
+                else (0, rail_width)
+            )
+        elif distance == length and not receiving_tie_present:
+            # Straddle only when the verified corridor extends beyond the end.
+            u1, u2 = (
+                _centered_interval(length, rail_width)
+                if longitudinal_max >= length + (rail_width - rail_width // 2)
+                else (length - rail_width, length)
+            )
         else:
             u1, u2 = _centered_interval(distance, rail_width)
         v1 = _centered_interval(min(active), rail_width)[0]
@@ -351,6 +392,12 @@ def synthesize_staged_mesh_segment(
         "rail_space_dbu": rail_space,
         "rail_pitch_dbu": pitch,
         "rail_offsets_dbu": list(offsets),
+        "centerline_baseline_present": centerline_baseline_present,
+        "terminal_access_strategy": (
+            "persistent_centerline_baseline"
+            if centerline_baseline_present
+            else "centerline_landing_tie_to_symmetric_rail_pair"
+        ),
         "rail_count": len(offsets),
         "minimum_rail_count": minimum_rail_count,
         "used_transverse_span_dbu": max(offsets) - min(offsets) + rail_width,
@@ -367,6 +414,93 @@ def synthesize_staged_mesh_segment(
         {"evidence": evidence, "boxes_dbu": [list(box) for box in ordered_boxes]}
     )
     return {"ok": True, "operations": operations, "boxes_dbu": [list(box) for box in ordered_boxes], "evidence": evidence}
+
+
+def synthesize_mesh_polyline(
+    *,
+    dbu_um: float,
+    points_um: Sequence[Sequence[float]],
+    segment_corridors_um: Sequence[Sequence[float]],
+    rail_width_um: float,
+    rail_space_um: float,
+    landing_span_um: float,
+    cross_tie_pitch_um: float | None = None,
+    cell: str = "ROUTE",
+    layer_role: str = "m1",
+) -> dict[str, Any]:
+    """Compile every segment of a routed polyline into one connected mesh artifact."""
+
+    if not isinstance(points_um, (list, tuple)) or len(points_um) < 2:
+        raise AnalysisError(
+            code="INVALID_MESH_POLYLINE",
+            message="Mesh polyline requires at least two points.",
+            details={"field": "points_um", "value": points_um},
+            next_action="Provide the verified non-degenerate Manhattan route polyline.",
+        )
+    if len(segment_corridors_um) != len(points_um) - 1:
+        raise AnalysisError(
+            code="MESH_SEGMENT_CORRIDOR_COUNT_MISMATCH",
+            message="Each route segment requires one independently verified corridor.",
+            details={
+                "segment_count": len(points_um) - 1,
+                "corridor_count": len(segment_corridors_um),
+            },
+            next_action="Provide one obstacle-free corridor for every straight route segment.",
+        )
+    compiled = []
+    operations_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for index, (start, end, corridor) in enumerate(
+        zip(points_um, points_um[1:], segment_corridors_um)
+    ):
+        segment = synthesize_staged_mesh_segment(
+            dbu_um=dbu_um,
+            start_um=start,
+            end_um=end,
+            corridor_um=corridor,
+            rail_width_um=rail_width_um,
+            rail_space_um=rail_space_um,
+            landing_span_um=landing_span_um,
+            cross_tie_pitch_um=cross_tie_pitch_um,
+            receiving_tie_present=False,
+            minimum_rail_count=2,
+            cell=cell,
+            layer_role=layer_role,
+        )
+        for operation in segment["operations"]:
+            key = (
+                operation["cell"],
+                operation["layer"],
+                *operation["bbox_um"],
+            )
+            operations_by_key[key] = operation
+        compiled.append(
+            {
+                "segment_index": index,
+                "start_um": list(start),
+                "end_um": list(end),
+                "corridor_um": list(corridor),
+                "evidence": segment["evidence"],
+            }
+        )
+    operations = [operations_by_key[key] for key in sorted(operations_by_key)]
+    evidence = {
+        "contract_version": 1,
+        "geometry_kind": "connected_multi_segment_low_resistance_mesh",
+        "single_rail_fallback_allowed": False,
+        "source_polyline_um": [list(point) for point in points_um],
+        "segment_count": len(compiled),
+        "bend_joint_count": max(0, len(points_um) - 2),
+        "rail_width_um": rail_width_um,
+        "rail_space_um": rail_space_um,
+        "minimum_rail_count_per_segment": 2,
+        "segments": compiled,
+        "operation_count": len(operations),
+        "terminal_and_bend_ties_emitted": True,
+    }
+    evidence["synthesis_fingerprint_sha256"] = _fingerprint(
+        {"evidence": evidence, "operations": operations}
+    )
+    return {"ok": True, "operations": operations, "evidence": evidence}
 
 
 def synthesize_maximum_contact_array(

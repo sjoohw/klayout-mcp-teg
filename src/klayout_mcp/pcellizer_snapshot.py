@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .errors import AnalysisError
+from .file_publication import (
+    OutputAlreadyExistsError,
+    publication_staging_prefix,
+    publish_new_directory,
+    publish_new_file,
+)
 from .pcellizer_contract import (
     normalize_source_layout_identity,
     validate_selection_binding,
@@ -385,22 +391,19 @@ def create_pcellizer_snapshot_package(
     final_dir = packages_root / package_hash
     if final_dir.exists():
         return _verify_package(final_dir)
-    staging_root = root / ".staging"
-    staging_root.mkdir(parents=True, exist_ok=True)
-    staging_dir = Path(tempfile.mkdtemp(prefix="pcellizer-", dir=staging_root))
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix=publication_staging_prefix("pcellizer", directory=True),
+            dir=packages_root,
+        )
+    )
     try:
         (staging_dir / embedded_filename).write_bytes(source_bytes)
         (staging_dir / "capture.json").write_bytes(capture_bytes)
         (staging_dir / "manifest.json").write_bytes(canonical_json_bytes(manifest))
         try:
-            os.replace(staging_dir, final_dir)
-        except OSError:
-            # Directory collision errors vary by platform (WinError 5,
-            # EEXIST, ENOTEMPTY).  Treat them as idempotent only when the
-            # complete content-addressed destination now exists; verification
-            # below still rejects a partial or hostile package.
-            if not final_dir.is_dir():
-                raise
+            publish_new_directory(staging_dir, final_dir)
+        except OutputAlreadyExistsError:
             shutil.rmtree(staging_dir)
     except Exception:
         if staging_dir.exists():
@@ -458,16 +461,53 @@ def recover_pcellizer_snapshot_source(
                 "Recovery target exists with different content.",
                 output_path=str(destination),
             )
-    else:
+        return {
+            "ok": True,
+            "output_path": str(destination),
+            "layout_sha256": source["sha256"],
+            "source_runtime_dependency_used": False,
+            "flattening_performed": False,
+            "production_ready": False,
+        }
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=publication_staging_prefix("pcellizer-recovery"),
+        suffix=expected_suffix,
+        dir=destination.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
         try:
-            destination.write_bytes(data)
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
         except OSError as exc:
             _fail(
                 "PCELLIZER_RECOVERY_WRITE_FAILED",
-                "Embedded source could not be recovered.",
+                "Embedded source could not be staged for recovery.",
                 output_path=str(destination),
                 error_type=type(exc).__name__,
             )
+        try:
+            publish_new_file(temporary, destination)
+        except OutputAlreadyExistsError:
+            try:
+                existing = destination.read_bytes()
+            except OSError as exc:
+                _fail(
+                    "PCELLIZER_RECOVERY_TARGET_READ_FAILED",
+                    "A concurrent recovery target could not be read safely.",
+                    output_path=str(destination),
+                    error_type=type(exc).__name__,
+                )
+            if hashlib.sha256(existing).hexdigest() != source["sha256"]:
+                _fail(
+                    "PCELLIZER_RECOVERY_TARGET_EXISTS",
+                    "A concurrent writer published different recovery content.",
+                    output_path=str(destination),
+                )
+    finally:
+        temporary.unlink(missing_ok=True)
     return {
         "ok": True,
         "output_path": str(destination),

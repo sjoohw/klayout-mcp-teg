@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
 import pytest
 
 from klayout_mcp.errors import AnalysisError
@@ -146,3 +149,31 @@ def test_manhattan_drawing_roundtrip_and_repeatability(tmp_path) -> None:
     )
     for key in ("dbu_um", "bbox_um", "layers", "cell_count", "cells", "operation_counts"):
         assert first[key] == second[key]
+
+
+def test_manhattan_concurrent_same_target_has_one_winner(tmp_path) -> None:
+    try:
+        executable = find_klayout_executable()
+    except Exception:
+        pytest.skip("KLayout executable is not installed")
+
+    requests = [_request(tmp_path, "race.gds"), _request(tmp_path, "race.gds")]
+    requests[1]["operations"][0]["bbox_um"][2] = 2.0
+    barrier = threading.Barrier(2)
+
+    def draw(request):
+        barrier.wait()
+        return draw_manhattan_layout(
+            **request,
+            confirm_nonproduction=True,
+            klayout_executable=str(executable),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(draw, requests))
+
+    assert sum(result["ok"] is True for result in results) == 1
+    loser = next(result for result in results if result["ok"] is False)
+    assert loser["code"] == "OUTPUT_ALREADY_EXISTS"
+    inventory = inspect_layout(str(tmp_path / "race.gds"), klayout_executable=str(executable))
+    assert inventory["ok"] is True

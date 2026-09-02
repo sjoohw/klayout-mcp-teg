@@ -1,6 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
 import json
 import subprocess
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -132,6 +134,36 @@ def test_batch_generates_one_or_many_hierarchy_safe_gds_and_verifies_hashes(tmp_
         klayout_executable=executable,
     )
     assert second["batch_dir"] == generated["batch_dir"]
+
+
+def test_batch_concurrent_same_plan_directory_publish_is_idempotent(tmp_path) -> None:
+    snapshot, recipe, plan, executable = _chain(tmp_path)
+    output_root = tmp_path / "outputs"
+    barrier = threading.Barrier(2)
+
+    def generate() -> dict:
+        barrier.wait()
+        return generate_pcellizer_split_batch_service(
+            package_dir=snapshot["package_dir"],
+            recipe=recipe,
+            batch_plan=plan,
+            output_root=str(output_root),
+            klayout_executable=executable,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: generate(), range(2)))
+
+    assert all(result["ok"] is True for result in results)
+    assert results[0]["batch_dir"] == results[1]["batch_dir"]
+    assert inspect_pcellizer_batch_package(batch_dir=results[0]["batch_dir"])[
+        "fresh_file_hashes_verified"
+    ] is True
+    assert list(
+        (output_root / "pcellizer-batches").glob(
+            ".klayout-stage-dir-pcellizer-batch-*"
+        )
+    ) == []
 
 
 def test_batch_package_detects_output_tampering(tmp_path) -> None:

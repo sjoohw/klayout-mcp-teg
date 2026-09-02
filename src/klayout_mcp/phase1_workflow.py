@@ -52,7 +52,10 @@ PHASE1_WORKFLOW_STAGES = (
     {
         "stage": "atomic_generation",
         "tools": ["generate_phase1_direct_teg"],
-        "purpose": "write once, fresh-reload, and attach the verified Phase 1 manifest",
+        "purpose": (
+            "legacy stage name retained for compatibility: create-only generation, fresh reload, "
+            "and verified Phase 1 manifest with same-target no-clobber publication"
+        ),
     },
 )
 
@@ -417,7 +420,7 @@ def guide_phase1_direct_workflow(
             code="INVALID_PHASE1_WORKFLOW_HANDOFF",
             message="The supplied layout plan is not ready for KLayout generation.",
             details={},
-            next_action="Regenerate the atomic Phase 1 layout plan.",
+            next_action="Regenerate the validated Phase 1 layout plan.",
         )
     if (
         layout_plan.get("process") != process
@@ -438,7 +441,10 @@ def guide_phase1_direct_workflow(
             completed=completed,
             stage="atomic_generation",
             tool="generate_phase1_direct_teg",
-            action="Generate to a new path and require fresh-reload semantic verification.",
+            action=(
+                "Generate to a unique staged path, publish create-only, preserve any concurrent "
+                "winner, and require fresh-reload semantic verification."
+            ),
             process=process,
         )
     _result_ok(generation_result, stage="atomic_generation")
@@ -450,7 +456,7 @@ def guide_phase1_direct_workflow(
             code="PHASE1_WORKFLOW_GENERATION_NOT_VERIFIED",
             message="Generation lacks fresh-reload verification or its Phase 1 manifest.",
             details={},
-            next_action="Do not accept the output; rerun atomic generation and inspect the structured error.",
+            next_action="Do not accept the output; inspect the structured error and regenerate to a new target if needed.",
         )
     manifest = generation_result["phase1_manifest"]
     if (
@@ -465,7 +471,7 @@ def guide_phase1_direct_workflow(
             code="PHASE1_WORKFLOW_GENERATION_DRIFT",
             message="The fresh-reload generation manifest differs from the composed layout plan.",
             details={},
-            next_action="Reject the output and rerun atomic generation from the validated layout plan.",
+            next_action="Reject the output and rerun create-only generation from the validated layout plan.",
         )
     completed.append("atomic_generation")
     projection = manifest.get("connectivity_projection", {})

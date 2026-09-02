@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import os
+import tempfile
 
 import pya
 
+from .file_publication import (
+    OutputAlreadyExistsError,
+    publication_staging_prefix,
+    publish_new_file,
+)
 from .worker_protocol import worker_error
 
 
@@ -188,10 +194,14 @@ def render_boundary_overlay(request, existing_layout):
                 )
 
     view.zoom_fit()
-    temporary_path = image_path + ".tmp.png"
+    temporary_handle, temporary_path = tempfile.mkstemp(
+        prefix=publication_staging_prefix("overlay"),
+        suffix=".png",
+        dir=parent,
+    )
+    os.close(temporary_handle)
+    os.remove(temporary_path)
     try:
-        if os.path.exists(temporary_path):
-            os.remove(temporary_path)
         view.save_image(temporary_path, width, height)
         if not os.path.isfile(temporary_path) or os.path.getsize(temporary_path) == 0:
             return worker_error(
@@ -200,7 +210,15 @@ def render_boundary_overlay(request, existing_layout):
                 {"image_path": image_path},
                 "Inspect hidden-view rendering support.",
             )
-        os.replace(temporary_path, image_path)
+        try:
+            publish_new_file(temporary_path, image_path)
+        except OutputAlreadyExistsError:
+            return worker_error(
+                "OUTPUT_EXISTS",
+                "Another writer published the boundary overlay first; its result was preserved.",
+                {"image_path": image_path},
+                "Provide a new PNG path or reuse the existing winning artifact.",
+            )
     finally:
         if os.path.exists(temporary_path):
             os.remove(temporary_path)

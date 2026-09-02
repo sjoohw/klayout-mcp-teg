@@ -20,6 +20,10 @@ LLM orchestration 지침도 저장소에 함께 둔다. 범용 GDS/PCell 작업�
 > 생성 결과는 비생산용이다. Fresh reload, XOR와 internal connectivity 검사는 file/geometry
 > 무결성 증거이지 foundry sign-off, 측정 가능성 또는 PCM release 증거가 아니다.
 
+현재 구현과 목표 계약을 혼동하지 않으려면 먼저
+[Current capability boundaries](docs/current-capability-boundaries.md)를 읽는다. 특히 tool이
+등록되어 있거나 `expert` mode에 보인다는 사실은 target-process readiness를 뜻하지 않는다.
+
 ## 현재 가능한 것
 
 | 사용자 결과 | Stock checkout | 의미 |
@@ -27,11 +31,14 @@ LLM orchestration 지침도 저장소에 함께 둔다. 범용 GDS/PCell 작업�
 | GDS/OAS inspect·compare | 가능 | 입력을 바꾸지 않고 hierarchy/layer/geometry 관측 |
 | Generic Manhattan drawing | 가능 | 명시적 DBU/layer/geometry로 새 nonproduction file 생성 |
 | Kelvin regression example | 가능 | 보존된 project reference 범위에서만 유효 |
-| PCellizer split batch | 제한 지원 | 직접 선택한 box 한 개·parameter 한 개, flatten 없이 hierarchy copy-on-write |
+| PCellizer split batch | 제한 지원 | Non-array occurrence의 direct box 한 축·parameter 한 개를 resize한 row별 static GDS; reusable PCell 생성 아님 |
 | Reference Library | 가능 | Full GDS hash 보관과 사용자 KLayout confirmation |
 | Reference style 추출 | 가능 | hierarchy/layer/직교성/치수 빈도 관측; rule·net·전기 특성 추론 없음 |
-| Persistent `teg_intake` | 가능 | Exact profile/version/family의 draft/job 저장 |
-| Persistent plan/generate/verify | Host 통합 필요 | Trusted approval verifier와 process generation engine 필요 |
+| Direct-measurement Phase 1 | 제한된 nonproduction scaffold | Transistor adapter 없음, Pad 재합성; bounded polyline은 multi-rail mesh로 compile |
+| Pad macro onboarding | 지원 | Source cell을 immutable artifact로 등록하고 새 top에서 instance overlay; Phase 1과는 아직 미연결 |
+| Transistor corpus onboarding | 지원 | Labeled DUT coverage/style/variation/holdout score artifact; 신규 공정 PCell·foundry 승인은 아님 |
+| Persistent `teg_intake` | 제한 지원 | Stock은 bundled research-only Kelvin resistor profile/version에 한정; 임의 target은 host provider 필요 |
+| Persistent plan/generate/verify | Host 통합 필요 | Target-production verifier/provider/engine과 external runner/policy 필요 |
 | Foundry sign-off·PCM release | 불가 | 실제 PDK/deck/probe/scribe/조직 정책 필요 |
 
 최근 무결성 보강으로 stream file과 `workflow://` 문서의 `teg_status` 재해시,
@@ -41,9 +48,17 @@ host-policy-selected external evidence 결속, durable generation staging과 job
 
 현재 가장 중요한 미비사항:
 
-- 조직 signoff policy 주입 지점은 구현됐지만 stock host에는 policy가 설정되지 않는다.
+- Stock Phase 1은 transistor에서 `PROCESS_PRIMITIVE_ADAPTER_NOT_IMPLEMENTED`로 중단한다.
+- Phase 1은 실제 padset GDS/OAS를 읽거나 보존하지 않고 frame/pad 수치로 Pad geometry를 다시 만든다.
+- Phase 1의 DUT–Pad route는 bounded polyline을 multi-rail mesh로 compile한다. 다만 legacy Phase 1은
+  여전히 실제 Pad macro 대신 synthetic Pad 위치를 사용한다.
+- Host-controlled external runner/preflight 계약은 구현됐지만 stock host에는 실제 runner, deck,
+  license 또는 signoff policy가 설정되지 않는다.
 - 실제 stdio `teg_*`와 host-injected verifier/engine을 함께 재시작하는 E2E가 없다.
 - Actual foundry scribe/probe/de-embedding/tester/PCM 계약과 adapter가 없다.
+- Model harness는 single-scenario Gemini proxy tool-call trace smoke이며 exact Gemma4 qualification이 아니다.
+- 공개 file/content-addressed directory writer에는 지원 local filesystem의 create-only publish와 race
+  회귀가 적용됐다. NFS/SMB/multi-host와 폐쇄망 RHEL deployment는 지원하지 않는다.
 
 이 항목은 [production 계약](docs/contracts-and-production.md)과
 [개발 우선순위](docs/development.md)에 상세히 기록한다.
@@ -53,15 +68,16 @@ host-policy-selected external evidence 결속, durable generation staging과 job
 필수 환경:
 
 - Python 3.11 이상.
-- `uv`.
+- Source checkout 설치·개발에는 `uv`. 이미 dependency가 설치된 interpreter로 launcher를 실행할 때
+  runtime 자체가 `uv`를 호출하지는 않는다.
 - KLayout 0.30.0 이상. 현재 검증 버전은 0.30.10.
 
 Repository root에서:
 
 ```powershell
-uv sync --extra dev
-uv run python --version
-uv run python -c "from klayout_mcp.klayout_adapter import find_klayout_executable; print(find_klayout_executable())"
+uv sync --frozen --extra dev
+uv run --frozen python --version
+uv run --frozen python -c "from klayout_mcp.klayout_adapter import find_klayout_executable; print(find_klayout_executable())"
 ```
 
 일반 MCP host 설정:
@@ -71,20 +87,37 @@ uv run python -c "from klayout_mcp.klayout_adapter import find_klayout_executabl
   "mcpServers": {
     "klayout-drawing": {
       "command": "uv",
-      "args": ["run", "klayout-teg-mcp"],
+      "args": ["run", "--frozen", "klayout-teg-mcp"],
       "cwd": "C:\\absolute\\path\\to\\klayout-auto",
       "env": {
         "KLAYOUT_EXE": "C:\\absolute\\path\\to\\klayout_app.exe",
-        "KLAYOUT_MCP_TOOL_MODE": "expert"
+        "KLAYOUT_MCP_TOOL_MODE": "drawing"
       }
     }
   }
 }
 ```
 
-Host가 `cwd`를 지원하지 않으면 `uv --directory <repository-root> run klayout-teg-mcp`를
+Host가 `cwd`를 지원하지 않으면 `uv --directory <repository-root> run --frozen klayout-teg-mcp`를
 사용한다. 직접 실행했을 때 아무 문구 없이 대기하는 것이 정상이다. Transport는 stdio이며
 보통 MCP host가 필요할 때 process를 시작하고 종료한다.
+
+KLayout 0.30.0 이상은 지원 정책이며 현재 검증 버전은 0.30.10이다. `server_status`의 버전 표시는
+설치된 executable의 version preflight가 아니므로 layout-backed tool로 별도 확인해야 한다.
+
+### Linux/csh source checkout
+
+`scripts/run-klayout-teg-mcp.csh`는 dependency installer나 폐쇄망 배포 bundle이 아니다. `uv sync`로
+만든 repository `.venv/bin/python`을 사용하거나 interpreter를 명시한다.
+
+```csh
+setenv KLAYOUT_MCP_PYTHON /absolute/path/to/klayout-auto/.venv/bin/python
+setenv KLAYOUT_EXE /absolute/path/to/klayout
+csh scripts/run-klayout-teg-mcp.csh
+```
+
+Launcher는 Python과 `mcp`/PyYAML import만 preflight한다. 지원 RHEL image, KLayout RPM/shared library,
+offline wheelhouse, PDK/deck/license까지 검증하는 deployment qualification은 아직 없다.
 
 상대 경로는 MCP process `cwd` 기준이다. Persistent job/output 기본 경로는 각각
 `output/workflow-jobs/`, `output/workflow-final/`이며 다음 환경변수로 변경할 수 있다.
@@ -100,13 +133,20 @@ KLAYOUT_MCP_WORKFLOW_OUTPUT_ROOT
 
 | `KLAYOUT_MCP_TOOL_MODE` | 내용 |
 |---|---|
-| `expert` | 전체 기능. 기본값이지만 전체 기능을 비교할 수 있는 모델/operator만 권장 |
-| `facade` | `server_status`, `teg_intake/status/plan/generate/verify` |
+| `expert` | 전체 기능. 명시적으로 opt-in하는 개발자/operator용 |
+| `facade` | `server_status`, `host_doctor`, `teg_intake/status/plan/generate/verify` |
 | `drawing` | `server_status`, draw/inspect/style/compare, mesh/contact planner |
+| `onboarding` | Pad macro와 labeled DUT corpus 등록·결정·score·candidate package |
 
 오타가 난 mode는 시작 시 실패한다. 실제 호출 가능 목록은 MCP `tools/list`를 기준으로 한다.
-작은 모델의 persistent 작업은 `facade`, 단순 geometry 작업은 `drawing`을 우선 사용하고,
+환경변수를 생략한 stock 기본값은 `drawing`이다. 작은 모델의 persistent 작업은 `facade`, 단순
+geometry 작업은 `drawing`, Pad/DUT example 등록은 `onboarding`을 사용하고,
 PCellizer/reference/profile 도구를 함께 선택해야 할 때만 `expert`를 사용한다.
+`expert`에는 conceptual DUT/PCell/assembly와 미완성 Phase 1 도구가 함께 보인다. 이는 기능 등급이나
+production readiness가 아니며, 처음 사용하는 host 예제는 의도적으로 `drawing`을 명시한다.
+`drawing` mode에는 Phase 1 도구가 없고, stock `facade`는 approval backend 부재로 `teg_plan` 호출 시
+계획을 만들기 전에 중단한다. Tool surface는 줄어들지만 server instruction은 아직 mode 공통이어서
+현재의 mode 분리는 제한 모델 검증 결과가 아니라 schema/tool-list 축소 수단이다.
 
 ## 어떤 workflow를 선택할까
 
@@ -116,7 +156,7 @@ PCellizer/reference/profile 도구를 함께 선택해야 할 때만 `expert`를
 | 기존 layout의 관측 style 추출 | `extract_layout_style` |
 | 두 layout 비교 | `compare_layouts` |
 | 명시적 box/text/instance/boolean drawing | `draw_manhattan_layout` |
-| 불완전한 transistor/resistor/capacitor TEG 요청 | `plan_direct_measurement_teg` |
+| 불완전한 transistor/resistor/capacitor TEG 요청의 intake/questions | `plan_direct_measurement_teg` — drawing 없음, transistor adapter 없음 |
 | Kelvin reference 재현 | `plan_kelvin_m1_routing` |
 | Existing GDS parameterization | `inventory_pcellizer_hierarchy` |
 | Process-node reference 등록 | `register_reference_layout` |
@@ -149,7 +189,7 @@ top_cell: SLN001_PADSET
 top_bbox_um: [0, 0, 2000, 54]
 ```
 
-### 3. Atomic nonproduction drawing
+### 3. Create-only nonproduction drawing
 
 먼저 `output/golden-tour/`를 만들고 다음 인자로 `draw_manhattan_layout`을 호출한다.
 
@@ -173,7 +213,9 @@ top_bbox_um: [0, 0, 2000, 54]
 ```
 
 `fresh_reload_verified=true`, single top, `production_ready=false`가 성공 기준이다. 생성본을
-다시 `inspect_layout`에 전달해 top/DBU/layer/bbox를 확인한다. 같은 파일명은 덮어쓰지 않는다.
+다시 `inspect_layout`에 전달해 top/DBU/layer/bbox를 확인한다. 이미 존재하는 파일은 보존된다. 같은
+local target의 동시 writer는 정확히 하나만 성공하고 loser는 winner를 변경하지 않은 채
+`OUTPUT_ALREADY_EXISTS`를 반환한다.
 
 ## Persistent workflow
 
@@ -197,6 +239,10 @@ uv run python examples/run_persistent_kelvin_demo.py --run-root output/persisten
 MeasurementManifest binding을 확인하지만 production 또는 tester readiness를 주장하지 않는다.
 
 ## 핵심 drawing 원칙
+
+아래 항목은 direct-measurement layout의 **목표 acceptance contract**이며 모든 stock workflow가 이미
+구현한다는 뜻이 아니다. 현재 Phase 1은 실제 pad macro를 보존하지 않고 DUT–Pad 장거리 route를
+single-width box로 만들며 standalone mesh/contact compiler를 소비하지 않는다.
 
 - 원본과 reference를 변경하지 않고 새 output만 만든다.
 - DBU와 `(layer, datatype)`을 명시하며 display color로 production layer를 추측하지 않는다.
@@ -228,6 +274,9 @@ SLN001의 frame, DBU, M1 mapping은 해당 regression profile의 값이며 전�
 새 공정에는 이 값을 복사하지 않고 onboarding 결과를 사용한다.
 
 ## Transistor context 기본값
+
+이 절은 planning/context policy다. Stock checkout에는 실제 transistor geometry adapter가 없으며
+conceptual scaffold가 이 adapter를 대신하지 않는다.
 
 사용자 요청에 따라 single-transistor DUT는 기본적으로 window를 `same_as_measured` array로
 채우고, 주변 소자는 routing하지 않으며 compatible neighbor는 diffusion을 공유한다. Array edge
@@ -262,12 +311,17 @@ polarity와 frequency를 DesignIntent와 정확히 대조한다. Timing, environ
 
 - Relative input은 MCP `cwd`에서 resolve한다.
 - Input은 snapshot/hash 후 읽는다.
-- Output은 새 basename과 host-controlled root만 허용한다.
-- Atomic write와 fresh KLayout reload 후에만 성공한다.
+- Persistent output은 새 basename과 host-controlled root를 사용한다. Generic drawing은 사용자가
+  지정한 기존 parent directory에 쓸 수 있으므로 같은 정책 범위로 간주하지 않는다.
+- Generic Manhattan drawing은 fsync된 sibling stage를 create-only hard link로 publish해 local
+  same-target winner를 보존한다. Style/overlay와 content-document/persistent final은 아직 이 helper로
+  이전되지 않았으므로 같은 target/job 호출을 외부에서 직렬화한다.
+- 단일 writer는 file write와 fresh KLayout reload 후에만 성공한다.
 - Persistent manifest는 append-only, content-addressed ancestry를 사용한다.
 - Job ID는 lowercase `[a-z0-9_-]`만 허용하고 Windows device alias를 거부한다.
 - Generation은 verified staging manifest를 먼저 남기고 sibling temp+replace로 final을 승격한다.
-- 동일 job의 manifest append는 OS file lock과 expected-parent 비교로 직렬화한다.
+- 동일 local job의 manifest-head append는 OS file lock과 expected-parent 비교로 직렬화한다.
+  Content-addressed document publish의 same-digest 동시 생성은 아직 별도 race 경계다.
 - Expected 업무 오류는 MCP `isError=true`와 code/message/details/next_action을 반환한다.
 
 대표 복구:
@@ -286,17 +340,13 @@ polarity와 frequency를 DesignIntent와 정확히 대조한다. Timing, environ
 ## 테스트
 
 ```powershell
-uv run --extra dev pytest -q
-uv run --extra dev python -m compileall -q src tests examples
+uv run --frozen --extra dev pytest -q
+uv run --frozen --extra dev python -m compileall -q src tests examples
 ```
 
-Current local snapshot:
-
-```text
-Windows / Python 3.13.5 / KLayout 0.30.10
-644 passed, 0 skipped, 1 upstream warning
-compileall passed
-```
+정적 pass count는 현재 commit의 release evidence가 아니다. 로컬 결과와 동일 SHA의 원격 CI 상태를
+각각 확인하고, 알려진 기준선은 [Current capability boundaries](docs/current-capability-boundaries.md)와
+[Development and validation](docs/development.md)을 따른다.
 
 상세 검증 범위, 구조, CI와 roadmap은 [development.md](docs/development.md)에 있다.
 
@@ -307,9 +357,11 @@ compileall passed
 - [보존된 최종 예제와 용도](examples/README.md)
 - [실행 가능성과 한계를 구분한 사용자 시나리오](scenario.md)
 - [Workflows and examples](docs/workflows.md)
+- [현재 구현 capability와 known limitations](docs/current-capability-boundaries.md)
 - [Contracts and production boundaries](docs/contracts-and-production.md)
 - [Development and validation](docs/development.md)
-- [최신 외부 검토 원문](feedback.md)과 [조치 기록](answer.md)
+- [Historical external review](feedback.md)와 [historical response](answer.md)
+- [현재 upgrade plan](upgrade_plan.md)
 
 README에는 처음 실행에 필요한 현재 사실만 유지한다. 긴 profile 사양, production 계약,
 개발 기록은 위 세 문서에서 관리하며 같은 내용을 여러 문서에 반복하지 않는다.

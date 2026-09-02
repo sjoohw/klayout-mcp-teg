@@ -1,4 +1,4 @@
-"""Host-side immutable layout-style extraction and optional profile export."""
+"""Host-side style extraction with create-only optional profile export."""
 
 from __future__ import annotations
 
@@ -10,6 +10,11 @@ import tempfile
 from typing import Any, Callable
 
 from .errors import AnalysisError
+from .file_publication import (
+    OutputAlreadyExistsError,
+    publication_staging_prefix,
+    publish_new_file,
+)
 from .klayout_adapter import create_layout_snapshot, run_klayout_worker
 from .layermap import load_layermap
 from .workflow_manifest import canonical_sha256
@@ -51,7 +56,7 @@ def _validate_output_path(output_profile_path: str) -> Path:
 
 def _atomic_json(path: Path, document: dict[str, Any]) -> None:
     handle, temporary = tempfile.mkstemp(
-        prefix=".layout-style-", suffix=".json", dir=path.parent
+        prefix=publication_staging_prefix("style"), suffix=".json", dir=path.parent
     )
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
@@ -59,7 +64,21 @@ def _atomic_json(path: Path, document: dict[str, Any]) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        try:
+            publish_new_file(temporary, path)
+        except OutputAlreadyExistsError as exc:
+            raise AnalysisError(
+                code="OUTPUT_ALREADY_EXISTS",
+                message=(
+                    "Another writer published the style profile first; its result "
+                    "was preserved."
+                ),
+                details={"output_profile_path": str(path)},
+                next_action=(
+                    "Choose a new output profile filename or reuse the existing "
+                    "winning artifact."
+                ),
+            ) from exc
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

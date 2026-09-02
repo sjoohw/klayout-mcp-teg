@@ -1,10 +1,14 @@
-"""Evaluate whether constrained models can use this MCP reliably.
+"""Run a single-scenario proxy MCP tool-call trace smoke.
 
 Baseline collection talks to the local stdio MCP directly. Live evaluation invokes
 an authenticated model runner in headless stream-JSON mode. The current runner
 adapter is ``agy``; it is transport, not the evaluation target. Evaluation artifacts
 omit model thoughts and fail closed when the runner does not emit a successful,
 non-empty result with the expected MCP tool behavior.
+
+This harness does not qualify Gemma-4-class reliability, mode-specific usability,
+argument correctness, tool-result interpretation, non-MCP write safety, or production
+readiness. Its default live model is a Gemini proxy and proxy equivalence is not claimed.
 """
 
 from __future__ import annotations
@@ -37,15 +41,30 @@ MCP_SERVER_NAME = "klayout-drawing"
 MCP_PERMISSION_RULE = f"mcp({MCP_SERVER_NAME}/*)"
 WRITE_TOOLS = {
     "assemble_teg",
+    "build_transistor_adapter_candidate",
+    "compose_registered_pad_macro",
+    "confirm_reference_view",
+    "create_pcellizer_snapshot",
     "draw_manhattan_layout",
     "export_pcell_code",
-    "generate_dut_geometry",
+    "extract_layout_style",
     "generate_kelvin_m1_teg",
+    "generate_pcellizer_split_batch",
     "generate_phase1_direct_teg",
+    "host_doctor",
+    "onboard_transistor_corpus",
+    "prepare_reference_view",
+    "recover_pcellizer_snapshot",
+    "register_pad_macro",
+    "register_reference_layout",
+    "register_transistor_adapter_candidate",
     "render_boundary_overlay",
+    "resolve_transistor_corpus",
+    "score_transistor_adapter",
     "teg_generate",
     "teg_intake",
     "teg_plan",
+    "teg_verify",
 }
 SCENARIOS: dict[str, dict[str, Any]] = {
     "S1": {
@@ -225,7 +244,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
     "S11": {
         "difficulty": "medium",
         "prompt": (
-            "새 persistent end-to-end TEG 작업을 시작하고 싶다. 아직 타깃 공정 profile과 "
+            "새 persistent intake 작업을 시작하고 싶다. 아직 타깃 공정 profile과 "
             "DUT 치수, terminal 역할, Pad 배정, bias와 안전 "
             "조건은 아직 확정하지 않았다. 파일이나 job을 만들지 말고, 채워야 할 유효한 "
             "초안과 확인 질문만 MCP에서 받아와라. 사용할 tool 이름은 스스로 찾아라."
@@ -372,6 +391,10 @@ def _server_parameters(project_root: Path) -> StdioServerParameters:
         if not previous_pythonpath
         else os.pathsep.join((str(source_root), previous_pythonpath))
     )
+    # The legacy scenario catalog spans the full diagnostic surface.  Production
+    # startup defaults to drawing; this proxy harness opts into expert explicitly
+    # so a baseline cannot silently change when the deployment default narrows.
+    environment["KLAYOUT_MCP_TOOL_MODE"] = "expert"
     return StdioServerParameters(
         command=sys.executable,
         args=["-m", "klayout_mcp.server"],
@@ -401,6 +424,41 @@ async def collect_mcp_snapshot(project_root: Path) -> dict[str, Any]:
     }
 
 
+def annotated_write_tools(mcp_snapshot: Mapping[str, Any]) -> set[str]:
+    """Return tools whose MCP annotation explicitly marks them as non-read-only."""
+
+    tools = mcp_snapshot.get("tools")
+    if not isinstance(tools, list):
+        raise RuntimeError("MCP snapshot is missing its tool records")
+    result: set[str] = set()
+    for tool in tools:
+        if not isinstance(tool, Mapping) or not isinstance(tool.get("name"), str):
+            raise RuntimeError("MCP snapshot contains an invalid tool record")
+        annotations = tool.get("annotations")
+        if not isinstance(annotations, Mapping) or "readOnlyHint" not in annotations:
+            raise RuntimeError(f"Tool {tool['name']} has no explicit readOnlyHint")
+        if annotations["readOnlyHint"] is False:
+            result.add(tool["name"])
+    return result
+
+
+def validate_write_tool_contract(mcp_snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Fail closed when scenario write guards drift from live MCP annotations."""
+
+    observed = annotated_write_tools(mcp_snapshot)
+    if observed != WRITE_TOOLS:
+        raise RuntimeError(
+            "Scenario write-tool guard drifted from MCP annotations: "
+            f"missing={sorted(observed - WRITE_TOOLS)!r}, "
+            f"stale={sorted(WRITE_TOOLS - observed)!r}"
+        )
+    return {
+        "source": "tools/list annotations.readOnlyHint",
+        "matches_scenario_guard": True,
+        "write_tools": sorted(observed),
+    }
+
+
 def _run_text(command: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(command),
@@ -419,7 +477,11 @@ def _agy_environment(project_root: Path, agy_command: str) -> dict[str, Any]:
         return {
             "available": False,
             "command": agy_command,
+            "version": None,
+            "mcp_server_registered": False,
+            "mcp_server_enabled": False,
             "permission_rule_required": MCP_PERMISSION_RULE,
+            "dangerous_skip_permissions_used": False,
         }
     version = _run_text([resolved, "--version"], cwd=project_root)
     servers = _run_text([resolved, "mcp", "list"], cwd=project_root)
@@ -450,6 +512,7 @@ def build_baseline(
     server_path = project_root / "src" / "klayout_mcp" / "server.py"
     instruction = extract_server_instruction(server_path)
     initialized_instruction = mcp_snapshot.get("server_instructions")
+    write_tool_contract = validate_write_tool_contract(mcp_snapshot)
     return {
         "schema_version": 3,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -466,20 +529,24 @@ def build_baseline(
             "secret_values_recorded": False,
         },
         "evaluation_goal": {
-            "target": "Gemma-4-class constrained-model MCP usability",
+            "intended_target_class": "Gemma-4-class constrained-model MCP usability",
+            "actual_model_under_test": None,
+            "scope": "single-scenario proxy MCP tool-call trace smoke",
+            "qualification_claim": "none",
             "dimensions": [
                 "tool_discovery",
                 "tool_selection",
                 "tool_ordering",
-                "argument_construction",
-                "write_safety",
-                "result_interpretation",
+                "selected_argument_guard_fields",
+                "mcp_write_tool_name_trace",
             ],
             "proxy_model": MODEL_DEFAULT,
             "proxy_equivalence_claimed": False,
+            "server_tool_mode": "expert_opt_in",
         },
         "model_contract": {
-            "model_under_test": MODEL_DEFAULT,
+            "model_under_test": None,
+            "default_live_proxy_model": MODEL_DEFAULT,
             "effort": EFFORT_DEFAULT,
             "include_thoughts": False,
         },
@@ -487,6 +554,14 @@ def build_baseline(
             "adapter": "agy stream-json",
             "is_evaluation_target": False,
             **_agy_environment(project_root, agy_command),
+        },
+        "write_tool_contract": write_tool_contract,
+        "scoring_boundaries": {
+            "completed_tool_result_checked": False,
+            "tool_result_is_error_checked": False,
+            "non_mcp_writes_detected": False,
+            "final_answer_semantic_rubric": False,
+            "permission_rule_enforced_by_harness": False,
         },
         "server_instruction": {
             key: value for key, value in instruction.items() if key != "text"
@@ -706,7 +781,10 @@ def run_live_scenario(
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "scenario_id": scenario_id,
         "rendered_prompt_sha256": canonical_sha256(prompt),
-        "evaluation_target": "Gemma-4-class constrained-model MCP usability",
+        "intended_target_class": "Gemma-4-class constrained-model MCP usability",
+        "actual_model_under_test": model,
+        "run_scope": "single-scenario proxy MCP tool-call trace smoke",
+        "qualification_claim": "none",
         "runner_adapter": "agy stream-json",
         "runner_is_evaluation_target": False,
         "proxy_equivalence_claimed": False,
@@ -734,6 +812,10 @@ def run_live_scenario(
         "secrets_recorded": False,
         "dangerous_skip_permissions_used": False,
         "permission_rule_required": MCP_PERMISSION_RULE,
+        "permission_rule_enforced_by_harness": False,
+        "completed_tool_result_checked": False,
+        "non_mcp_writes_detected": False,
+        "final_answer_semantic_rubric": False,
     }
 
 
@@ -766,6 +848,8 @@ async def async_main(args: argparse.Namespace) -> tuple[Path, bool]:
         raise ValueError("--timeout-seconds must be positive")
     output = (args.output or _default_output(project_root, live=args.live)).resolve()
     if args.live:
+        mcp_snapshot = await collect_mcp_snapshot(project_root)
+        write_tool_contract = validate_write_tool_contract(mcp_snapshot)
         record = await asyncio.to_thread(
             run_live_scenario,
             project_root=project_root,
@@ -775,6 +859,7 @@ async def async_main(args: argparse.Namespace) -> tuple[Path, bool]:
             agy_command=args.agy_command,
             timeout_seconds=args.timeout_seconds,
         )
+        record["write_tool_contract"] = write_tool_contract
     else:
         mcp_snapshot = await collect_mcp_snapshot(project_root)
         record = build_baseline(

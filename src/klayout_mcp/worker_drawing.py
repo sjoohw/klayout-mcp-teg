@@ -1,4 +1,4 @@
-"""KLayout worker handler for atomic general-purpose Manhattan drawings."""
+"""KLayout worker for create-only general-purpose Manhattan drawings."""
 
 from __future__ import annotations
 
@@ -7,6 +7,11 @@ import tempfile
 
 import pya
 
+from .file_publication import (
+    OutputAlreadyExistsError,
+    publication_staging_prefix,
+    publish_new_file,
+)
 from .worker_protocol import worker_error
 
 
@@ -133,7 +138,7 @@ def draw_manhattan_layout(request):
             expected_texts[(cell_name, layer_name)] = _direct_texts(cell, layer_index)
 
     handle, temporary_output = tempfile.mkstemp(
-        prefix=".manhattan-drawing-",
+        prefix=publication_staging_prefix("manhattan"),
         suffix=os.path.splitext(output_path)[1],
         dir=os.path.dirname(output_path),
     )
@@ -222,12 +227,17 @@ def draw_manhattan_layout(request):
                 }
             )
 
-        os.replace(temporary_output, output_path)
+        publish_new_file(temporary_output, output_path)
+    except OutputAlreadyExistsError:
+        return worker_error(
+            "OUTPUT_ALREADY_EXISTS",
+            "Another writer published the drawing output first; its result was preserved.",
+            {"output_layout_path": output_path},
+            "Choose a new output path or reuse the existing winning artifact.",
+        )
     except Exception as exc:
         if os.path.exists(temporary_output):
             os.unlink(temporary_output)
-        if os.path.exists(output_path):
-            os.unlink(output_path)
         return worker_error(
             "DRAWING_GENERATION_FAILED",
             "KLayout could not generate and verify the Manhattan drawing.",

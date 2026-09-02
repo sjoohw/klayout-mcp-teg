@@ -26,11 +26,19 @@ class AnalysisError(ValueError):
         return self.message
 
     def to_result(self) -> dict[str, Any]:
+        from .validation_report import report_from_error
+
         result: dict[str, Any] = {
             "ok": False,
             "code": self.code,
             "message": self.message,
             "details": self.details,
+            "validation_report": report_from_error(
+                code=self.code,
+                message=self.message,
+                details=self.details,
+                next_action=self.next_action,
+            ),
         }
         if self.next_action:
             result["next_action"] = self.next_action

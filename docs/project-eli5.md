@@ -59,6 +59,9 @@ XOR이 0이면 비교한 층의 도형은 같다. 공정 규칙과 전기 특성
 
 ## TEG를 만들 때 지키는 방향
 
+이 절은 만들고 싶은 TEG의 **목표 규칙**이다. 현재 stock Phase 1이 이 규칙을 모두 자동으로
+구현한다는 뜻은 아니다.
+
 이 프로젝트의 대표 TEG는 약 2000×54 µm 크기와 25개 Pad를 사용한다.
 
 이 크기와 Pad 수는 공정 규칙이 아니다. 작업마다 바꿀 수 있는 시작값이다.
@@ -71,29 +74,38 @@ Mesh는 전류가 지나갈 길을 늘린다. 금속 배선의 전압 손실을 
 
 배선이 Pad나 DUT와 만나는 부분도 검사한다. 얇은 목, 어긋난 중심, 겹쳐서 넓어진 부분을 찾는다.
 
+현재 Kelvin 예제와 독립 mesh planner는 이 규칙 일부를 확인한다. Direct Phase 1은 Pad 파일을
+복사하지 않고 사각형 Pad를 다시 만들며, DUT와 Pad 사이를 한 폭의 box로 연결한다. 두 경로는 아직
+서로 연결되지 않았다.
+
 ## Transistor TEG
 
 DUT는 실제로 측정할 소자다. Transistor 한 개를 측정해도 주변은 빈 땅으로 두지 않는다.
 
-기본 설정은 DUT 영역을 같은 transistor 배열로 채운다. 그중 중앙에 가까운 소자 하나를 측정한다.
+Planning 기본 설정은 DUT 영역을 같은 transistor 배열로 채우고 그중 중앙에 가까운 소자 하나를
+측정하는 것이다.
 
 주변 transistor는 보통 배선하지 않는다. 조건이 맞으면 이웃 소자끼리 diffusion을 공유한다.
 
-측정할 transistor가 넓어지면 contact 수도 늘린다. 허용된 규칙 안에서 가능한 수를 사용한다.
+측정할 transistor가 넓어지면 contact 수도 늘리는 것이 목표 계약이다. 현재 독립 contact planner와
+conceptual fixture가 있을 뿐 실제 transistor 생성 경로에 통합돼 있지 않다.
 
-공정별 transistor 생성에는 별도 adapter가 필요하다. Adapter는 승인된 PCell이나 Reference GDS를 사용한다.
+공정별 transistor 생성에는 별도 adapter가 필요하다. Adapter는 승인된 PCell이나 Reference GDS를
+사용해야 하며, stock checkout에는 이 adapter가 없다.
 
 ## PCellizer
 
 PCell은 치수를 바꿔 다시 만들 수 있는 도형 묶음이다.
 
-PCellizer는 기존 GDS에서 바꿀 부분을 고른다. 사용자는 ruler로 두 edge 사이를 표시할 수 있다.
+PCellizer는 기존 GDS에서 바꿀 direct box를 고른다. 사용자는 ruler로 두 edge 사이를 표시할 수 있다.
 
-확정된 치수와 split 표를 주면 여러 GDS를 만든다. CSV와 Excel에서 복사한 표도 입력 후보가 된다.
+확정된 치수와 split 표를 주면 row별 static GDS를 만든다. CSV와 Excel에서 복사한 표도 입력 후보가
+된다. 다시 호출할 수 있는 KLayout PCell library를 만드는 기능은 아니다.
 
 원본의 계층 구조는 유지한다. Mirroring, array, 여러 cell 조합도 occurrence 경로와 transform으로 구분한다.
 
-현재 PCellizer는 제한된 첫 버전이다. 선택한 box 하나와 parameter 하나가 주된 지원 범위다.
+현재 PCellizer는 제한된 첫 버전이다. Non-array occurrence의 선택한 box 한 축과 parameter key 하나가
+지원 범위다. Array member specialization과 W×L dependent-shape 변경은 지원하지 않는다.
 
 ## Reference Library
 
@@ -127,7 +139,8 @@ Skill이 없어도 MCP 서버는 실행된다. 다른 컴퓨터에서는 저장�
 - `tests/`: 같은 입력이 같은 결과를 내는지 확인하는 검사
 - `output/`: 작업 중 만든 결과를 두는 공간
 
-원본과 기준 GDS는 덮어쓰지 않는다. 새 결과는 다른 이름과 경로에 저장한다.
+원본과 기준 GDS는 입력으로 수정하지 않는다. 새 결과는 다른 이름과 경로에 저장하고, 같은 output을
+동시에 만드는 작업은 아직 안전하지 않으므로 agent/process마다 경로를 나누거나 직렬화한다.
 
 ## 현재 할 수 있는 일
 
@@ -144,6 +157,8 @@ Skill이 없어도 MCP 서버는 실행된다. 다른 컴퓨터에서는 저장�
 - 처음 보는 공정의 규칙을 스스로 알아내지 못한다.
 - 이름과 색만 보고 layer 용도를 확정하지 못한다.
 - 공정 adapter 없이 production transistor를 만들지 못한다.
+- 실제 pad macro를 보존한 채 Phase 1에 넣지 못한다.
+- 21-DUT 장거리 mesh를 bounded global routing으로 만들지 못한다.
 - 내부 검사만으로 DRC, LVS, PEX 통과를 선언하지 못한다.
 - GDS가 실제 wafer 측정에 준비됐다고 혼자 승인하지 못한다.
 
@@ -156,7 +171,7 @@ DRC는 도형 규칙 검사다. LVS는 도면과 회로 연결 비교다. PEX는
 1. Python, `uv`, KLayout을 설치한다.
 2. MCP host에 이 저장소의 실행 명령을 등록한다.
 3. `onboarding.md`의 공정 입력을 준비한다.
-4. 대표 DUT 하나로 pilot GDS를 만든다.
+4. 실제 adapter와 pad/routing integration이 준비된 공정만 대표 DUT 하나로 pilot GDS를 만든다.
 5. KLayout에서 pilot을 확인한 뒤 전체 split을 만든다.
 
 첫 작업은 `onboarding.md`의 입력 표를 채우고 대표 DUT 한 개로 pilot GDS를 만드는 것이다.

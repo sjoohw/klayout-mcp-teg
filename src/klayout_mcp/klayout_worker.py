@@ -15,9 +15,11 @@ from klayout_mcp.worker_compare import (
     compare_layouts,
 )
 from klayout_mcp.worker_drawing import draw_manhattan_layout
+from klayout_mcp.worker_dut_corpus import inspect_dut_corpus
 from klayout_mcp.worker_inventory import inspect_layout
 from klayout_mcp.worker_kelvin import generate_kelvin_m1_teg
 from klayout_mcp.worker_padset import analyze_padset
+from klayout_mcp.worker_pad_macro import compose_pad_macro_overlay, inspect_pad_macro
 from klayout_mcp.worker_style import extract_layout_style
 from klayout_mcp.worker_pcellizer import inventory_pcellizer_hierarchy
 from klayout_mcp.worker_pcellizer_batch import generate_pcellizer_batch
@@ -26,6 +28,8 @@ from klayout_mcp.worker_protocol import worker_error
 
 HANDLERS = {
     "analyze_padset_integrated": analyze_padset,
+    "inspect_pad_macro": inspect_pad_macro,
+    "compose_pad_macro_overlay": compose_pad_macro_overlay,
     "inspect_sample_layout": inspect_layout,
     "inspect_layout": inspect_layout,
     "extract_layout_style": extract_layout_style,
@@ -34,6 +38,7 @@ HANDLERS = {
     "compare_kelvin_layouts": compare_kelvin_layouts,
     "compare_layouts": compare_layouts,
     "draw_manhattan_layout": draw_manhattan_layout,
+    "inspect_dut_corpus": inspect_dut_corpus,
     "inventory_pcellizer_hierarchy": inventory_pcellizer_hierarchy,
     "generate_pcellizer_batch": generate_pcellizer_batch,
 }

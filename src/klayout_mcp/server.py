@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from importlib.metadata import version as package_version
+import json
 import os
 from pathlib import Path
 import platform
+import re
 from typing import Annotated, Any, Mapping
 
 from mcp.server.fastmcp import FastMCP
@@ -25,11 +27,18 @@ from .design_contract import (
 )
 from .device_doe import plan_phase1_device_doe as build_phase1_device_doe
 from .dut_geometry import DutParameters, build_dut_geometry, describe_dut_pcell_contract
+from .dut_corpus import (
+    build_technology_adapter_candidate as build_adapter_candidate,
+    onboard_dut_corpus as onboard_labeled_dut_corpus,
+    resolve_corpus_variations as resolve_labeled_corpus,
+    score_reproduced_corpus as score_labeled_corpus,
+)
 from .drawing_service import draw_manhattan_layout_service
 from .evidence_state import evidence_ladder_contract
 from .errors import AnalysisError
 from .external_evidence import external_evidence_contract
 from .geometry import Box
+from .host_factory import HostComponents, build_host_components_from_toml
 from .klayout_adapter import create_layout_snapshot, run_klayout_worker
 from .kelvin_service import (
     compare_kelvin_layouts_service,
@@ -49,6 +58,10 @@ from .mesh_routing import (
 )
 from .mcp_protocol import ADDITIVE_WRITE, READ_ONLY, McpToolResult, protocol_tool
 from .organization_presets import load_organization_preset
+from .pad_macro import (
+    compose_pad_macro_overlay as compose_immutable_pad_overlay,
+    create_pad_macro_artifact,
+)
 from .padset import PadDetectionConfig, analyze_pad_boxes as analyze_boxes
 from .padset_service import analyze_padset_snapshot
 from .pcell_library import generate_pcell_python_source
@@ -94,12 +107,13 @@ from .selection import select_routed_units as select_units
 from .sample_service import inspect_sample_dut_service
 from .style_service import extract_layout_style_service
 from .teg_planning import plan_teg_measurement_request
+from .technology_registry import TechnologyAdapterRegistry
+from .verification_runner import external_verification_runner_contract
 from .transistor_context import plan_single_transistor_context as build_single_transistor_context
 from .workflow_manifest import workflow_document_contract
 from .workflow_types import (
     ApprovalReferenceInput,
     DesignIntentDraftInput,
-    MeasurementManifestInput,
 )
 from .workflow_store import (
     MappingProcessCapabilityProvider,
@@ -113,6 +127,7 @@ from .workflow_store import (
 # Backward-compatible injection seam retained while implementation lives in padset_service.
 _analyze_padset_snapshot = analyze_padset_snapshot
 _teg_workflow_facade_instance: TegWorkflowFacade | None = None
+_host_components_instance: HostComponents | None = None
 _active_tool_mode = "expert"
 
 _TOOL_MODE_ALLOWLISTS: dict[str, frozenset[str] | None] = {
@@ -120,6 +135,7 @@ _TOOL_MODE_ALLOWLISTS: dict[str, frozenset[str] | None] = {
     "facade": frozenset(
         {
             "server_status",
+            "host_doctor",
             "teg_intake",
             "teg_status",
             "teg_plan",
@@ -136,6 +152,19 @@ _TOOL_MODE_ALLOWLISTS: dict[str, frozenset[str] | None] = {
             "compare_layouts",
             "plan_staged_mesh_segment",
             "plan_maximum_contact_array",
+        }
+    ),
+    "onboarding": frozenset(
+        {
+            "server_status",
+            "host_doctor",
+            "register_pad_macro",
+            "compose_registered_pad_macro",
+            "onboard_transistor_corpus",
+            "resolve_transistor_corpus",
+            "score_transistor_adapter",
+            "build_transistor_adapter_candidate",
+            "register_transistor_adapter_candidate",
         }
     ),
 }
@@ -158,12 +187,39 @@ def _default_workflow_roots() -> tuple[Path, Path]:
     return workflow_root, workflow_output_root
 
 
-def _default_teg_workflow_facade() -> TegWorkflowFacade:
-    """Build the local persistent facade; approval remains fail-closed by default."""
+def _onboarding_roots() -> dict[str, Path]:
+    workflow_root, output_root = _default_workflow_roots()
+    return {
+        "pad_macros": workflow_root / "onboarding" / "pad-macros",
+        "pad_outputs": output_root / "onboarding-pad-overlays",
+        "corpora": workflow_root / "onboarding" / "dut-corpora",
+        "resolutions": workflow_root / "onboarding" / "corpus-resolutions",
+        "scorecards": workflow_root / "onboarding" / "adapter-scorecards",
+        "adapters": workflow_root / "onboarding" / "adapter-candidates",
+    }
 
-    global _teg_workflow_facade_instance
-    if _teg_workflow_facade_instance is not None:
-        return _teg_workflow_facade_instance
+
+def _content_package(root: Path, digest: str) -> Path:
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise AnalysisError(
+            code="INVALID_CONTENT_PACKAGE_HASH",
+            message="Artifact package reference must be a lowercase SHA-256 digest.",
+            details={"field": "package_sha256", "value": digest, "stage": "onboarding"},
+            next_action="Use the exact package hash returned by the preceding onboarding tool.",
+        )
+    return root / digest
+
+
+def _default_host_components() -> HostComponents:
+    """Build explicit stock host components; approval remains fail-closed."""
+
+    global _host_components_instance
+    if _host_components_instance is not None:
+        return _host_components_instance
+    deployment_path = os.environ.get("KLAYOUT_MCP_DEPLOYMENT_TOML")
+    if deployment_path:
+        _host_components_instance = build_host_components_from_toml(deployment_path)
+        return _host_components_instance
     project_root = Path(__file__).resolve().parents[2]
     workflow_root, workflow_output_root = _default_workflow_roots()
     provider = MappingProcessCapabilityProvider(
@@ -194,7 +250,7 @@ def _default_teg_workflow_facade() -> TegWorkflowFacade:
             else None
         ),
     )
-    _teg_workflow_facade_instance = TegWorkflowFacade(
+    _host_components_instance = HostComponents(
         store=WorkflowJobStore(
             workflow_root,
             output_root=workflow_output_root,
@@ -202,9 +258,22 @@ def _default_teg_workflow_facade() -> TegWorkflowFacade:
         process_provider=provider,
         approval_verifier=None,
         engine_registry=registry,
+        technology_registry=TechnologyAdapterRegistry(
+            workflow_root / "technology-registry"
+        ),
         production_mode=True,
         output_class="nonproduction_gds",
     )
+    return _host_components_instance
+
+
+def _default_teg_workflow_facade() -> TegWorkflowFacade:
+    """Build the local persistent facade from explicit host components."""
+
+    global _teg_workflow_facade_instance
+    if _teg_workflow_facade_instance is not None:
+        return _teg_workflow_facade_instance
+    _teg_workflow_facade_instance = _default_host_components().build_facade()
     return _teg_workflow_facade_instance
 
 
@@ -213,13 +282,18 @@ mcp = FastMCP(
     instructions=(
         "General-purpose Manhattan layout drawing and PCell MCP. The fixed 25-Pad TEG, "
         "transistor, and Kelvin flows are optional domain profiles, not the server scope. "
+        "Tool registration is not process readiness. Stock Phase 1 is nonproduction: transistor "
+        "has no process adapter and Pad geometry is synthesized rather than imported. Its "
+        "DUT-to-Pad polylines compile to bounded multi-rail meshes, but conceptual DUT tools "
+        "cannot replace the missing transistor, pad-macro, or foundry adapters. "
         "If a generation request omits any process, rule, terminal, bias, obstacle, dimension, "
         "or output-path decision, call plan_direct_measurement_teg with only facts explicitly "
         "provided by the user. Never change a confirmation from false to true, never invent "
         "terminal assignments, and stop after returning its required questions; do not call a "
         "write tool, shell command, or downstream primitive in that turn. "
-        "Use draw_manhattan_layout for atomic cell, box, text, orthogonal-instance, and "
-        "boolean drawing from explicit DBU and layer contracts. "
+        "Use draw_manhattan_layout for create-only cell, box, text, orthogonal-instance, and "
+        "boolean drawing from explicit DBU and layer contracts; same-target local writers have "
+        "one no-clobber winner. "
         "For a resumable Phase 1 direct-measurement workflow, call "
         "guide_phase1_direct_workflow with the outputs already obtained; follow its single "
         "next_tool and next_action without skipping or silently mutating handoffs. "
@@ -236,7 +310,9 @@ mcp = FastMCP(
         "return unmatched markers as non-blocking REVIEW_NEEDED advice; do not stop drawing "
         "solely because an unvalidated similarity gate rejected a marker. Report REF_ACCEPTED "
         "separately from DRC-clean. "
-        "For the persistent end-to-end path, start with teg_intake. If no complete draft "
+        "For the host-integrated persistent workflow contract, start with teg_intake. Stock "
+        "supports the bundled research-only Kelvin template/intake/status path and fails at "
+        "teg_plan before planning because no trusted approval verifier is configured. If no complete draft "
         "exists, omit design_intent_draft and provide an exact template process/version and "
         "one device family; fill every returned required question before calling teg_intake "
         "again. Continue only with teg_plan, teg_generate, and teg_verify using the returned "
@@ -250,15 +326,18 @@ mcp = FastMCP(
         "unsupported SA/SB, WPE, STI, orientation, dummy, finger, contact, or guard-ring rules. "
         "Use plan_phase1_direct_teg_layout only after those gates pass; it must recheck exact "
         "DUT-terminal-to-Pad endpoints, non-target Pad/DUT crossings, and width-dependent "
-        "first-metal spacing before producing an atomic draw_manhattan_layout request. "
-        "Padset and layermap are mandatory for production work. "
+        "first-metal spacing before producing a draw_manhattan_layout request. "
+        "Padset and layermap are mandatory for production work, and current Phase 1 cannot "
+        "satisfy the padset-preservation requirement. "
         "Use padset DBU. Do not infer production layers. Do not run DRC or LVS by default. "
         "Routing must be horizontal/vertical Manhattan geometry only; diagonal and arbitrary-"
         "angle routing are forbidden. Before interpreting width and length, ask the user to "
         "confirm their meanings and pass dimension_semantics. For generic or resistor geometry, "
         "width is transverse to current flow and length is longitudinal to current flow; this "
         "directional mapping imposes no width-versus-length numeric ordering. Never swap them. "
-        "For direct-measurement TEG terminal-to-Pad routing, forbid long single-rail fallback. "
+        "The following mesh/contact rules are target acceptance requirements, not claims about "
+        "the current Phase 1 composer. For direct-measurement TEG terminal-to-Pad routing, "
+        "forbid long single-rail fallback. "
         "Outside a bounded terminal transition, require process-rule-compliant parallel "
         "orthogonal rails, repeated cross-ties, a hole-bearing merged mesh, and multiple "
         "positive-area Pad landings for source, drain, gate, body, force, sense, and shared "
@@ -321,7 +400,26 @@ def server_status() -> McpToolResult:
             "active_mode": _active_tool_mode,
             "available_modes": sorted(_TOOL_MODE_ALLOWLISTS),
             "configuration": "KLAYOUT_MCP_TOOL_MODE",
-            "expert_is_default": True,
+            "expert_is_default": False,
+            "expert_is_readiness_claim": False,
+            "mode_reduces_tools_not_common_instruction": True,
+        },
+        "capabilities_semantics": (
+            "registered tools include planning, conceptual, nonproduction, and incomplete "
+            "workflows; registration is not target-process readiness"
+        ),
+        "known_limitations": {
+            "stock_classification": "generic_nonproduction_drawing_and_contract_framework",
+            "transistor_primitive_adapter": "not_implemented",
+            "conceptual_transistor_is_phase1_fallback": False,
+            "phase1_padset_import_or_preservation": "not_implemented",
+            "phase1_pad_geometry": "synthesized_from_frame_and_pad_count",
+            "phase1_dut_to_pad_route_geometry": "bounded_polyline_compiled_to_multi_rail_mesh",
+            "phase1_standalone_mesh_compiler_integrated": True,
+            "phase1_global_search_budget": "global_node_and_wall_time_budget_enforced",
+            "same_target_concurrent_writers_supported": True,
+            "generic_manhattan_same_target_no_clobber": True,
+            "exact_gemma4_qualified": False,
         },
         "capabilities": [
             "analyze_pad_boxes",
@@ -368,6 +466,14 @@ def server_status() -> McpToolResult:
             "guide_phase1_direct_workflow",
             "plan_phase1_direct_teg_layout",
             "generate_phase1_direct_teg",
+            "host_doctor",
+            "register_pad_macro",
+            "compose_registered_pad_macro",
+            "onboard_transistor_corpus",
+            "resolve_transistor_corpus",
+            "score_transistor_adapter",
+            "build_transistor_adapter_candidate",
+            "register_transistor_adapter_candidate",
             "teg_intake",
             "teg_status",
             "teg_plan",
@@ -387,10 +493,11 @@ def server_status() -> McpToolResult:
             "compare_existing_layouts": ["compare_layouts"],
             "generic_nonproduction_drawing": ["draw_manhattan_layout"],
             "incomplete_direct_teg_request": ["plan_direct_measurement_teg"],
-            "resumable_direct_teg": ["guide_phase1_direct_workflow"],
+            "nonproduction_phase1_handoff_guide": ["guide_phase1_direct_workflow"],
             "parameterize_existing_gds": ["inventory_pcellizer_hierarchy"],
             "process_reference_library": ["register_reference_layout"],
-            "host_integrated_persistent_job": ["teg_intake", "teg_status"],
+            "stock_persistent_intake_or_status": ["teg_intake", "teg_status"],
+            "configured_host_readiness": ["host_doctor"],
         },
         "runtime": {
             "python": platform.python_version(),
@@ -409,9 +516,11 @@ def server_status() -> McpToolResult:
         ),
         "workflow_store_contract": workflow_store_contract(),
         "external_evidence_contract": external_evidence_contract(),
+        "external_verification_runner_contract": external_verification_runner_contract(),
         "reference_library_contract": reference_library_contract(),
         "persistent_facade": {
             "tools": [
+                "host_doctor",
                 "teg_intake",
                 "teg_status",
                 "teg_plan",
@@ -420,17 +529,22 @@ def server_status() -> McpToolResult:
             ],
             "default_approval_backend_configured": False,
             "stock_execution_limit": (
-                "teg_intake is available, but approval-dependent persistent actions "
-                "fail closed until a trusted host verifier and matching profile engine "
-                "are configured"
+                "stock teg_intake accepts the exact bundled research Kelvin-resistor "
+                "profile and its Kelvin engines are registered; teg_plan will fail closed "
+                "before planning because no trusted host verifier is configured. Other target-production "
+                "profiles additionally require matching providers, engines, runners, and policy"
             ),
             "bundled_process_profiles": [
                 {
                     "profile": "sln001_kelvin_reference_demo",
                     "version": "golden-v15-2026-08-25",
-                    "engine_status": "plan_and_generate_when_host_approval_is_configured",
+                    "classification": "research_only_nonproduction_resistor_demo",
+                    "engine_status": "planning_registered_generation_requires_golden_and_host_approval",
                 },
             ],
+            "target_production_transistor_engine_configured": False,
+            "external_report_normalization_contract_available": True,
+            "drc_lvs_pex_execution_runner_configured": False,
         },
     }
     allowlist = _TOOL_MODE_ALLOWLISTS[_active_tool_mode]
@@ -455,6 +569,213 @@ def server_status() -> McpToolResult:
 
 
 @protocol_tool(mcp, annotations=ADDITIVE_WRITE)
+def host_doctor(active_output_probe: bool = False) -> McpToolResult:
+    """Report configured profile×stage readiness and optionally probe output publication."""
+
+    try:
+        return _default_host_components().doctor(
+            active_output_probe=active_output_probe
+        )
+    except AnalysisError as exc:
+        return exc.to_result()
+
+
+@protocol_tool(mcp, annotations=ADDITIVE_WRITE)
+def register_pad_macro(
+    source_layout_path: str,
+    top_cell: str,
+    access_layer: dict[str, int],
+    instances: list[dict[str, Any]],
+    expected_width_um: float = 40.0,
+    expected_height_um: float = 40.0,
+    expected_dbu_um: float | None = None,
+    klayout_executable: str | None = None,
+) -> McpToolResult:
+    """Inspect and preserve one immutable black-box pad macro package."""
+
+    try:
+        return create_pad_macro_artifact(
+            source_layout_path=source_layout_path,
+            top_cell=top_cell,
+            access_layer=access_layer,
+            instances=instances,
+            package_root=_onboarding_roots()["pad_macros"],
+            expected_width_um=expected_width_um,
+            expected_height_um=expected_height_um,
+            expected_dbu_um=expected_dbu_um,
+            klayout_executable=klayout_executable,
+        )
+    except AnalysisError as exc:
+        return exc.to_result()
+
+
+@protocol_tool(mcp, annotations=ADDITIVE_WRITE)
+def compose_registered_pad_macro(
+    pad_macro_sha256: str,
+    output_name: str,
+    operations: list[dict[str, Any]],
+    output_top_cell: str = "TEG_PAD_MACRO_OVERLAY",
+    klayout_executable: str | None = None,
+) -> McpToolResult:
+    """Compose immutable pad instances with separate DUT/routing boxes."""
+
+    try:
+        roots = _onboarding_roots()
+        if Path(output_name).name != output_name or Path(output_name).suffix.lower() not in {".gds", ".oas"}:
+            raise AnalysisError(
+                code="INVALID_ONBOARDING_OUTPUT_NAME",
+                message="output_name must be one new GDS/OAS basename.",
+                details={"field": "output_name", "value": output_name, "stage": "pad_macro_compose"},
+                next_action="Provide a new basename such as pad-overlay.gds.",
+            )
+        roots["pad_outputs"].mkdir(parents=True, exist_ok=True)
+        return compose_immutable_pad_overlay(
+            package_path=_content_package(roots["pad_macros"], pad_macro_sha256),
+            output_path=str(roots["pad_outputs"] / output_name),
+            operations=operations,
+            output_top_cell=output_top_cell,
+            klayout_executable=klayout_executable,
+        )
+    except AnalysisError as exc:
+        return exc.to_result()
+
+
+@protocol_tool(mcp, annotations=ADDITIVE_WRITE)
+def onboard_transistor_corpus(
+    source_layout_path: str,
+    technology_identity: dict[str, Any],
+    device_family: str,
+    topology: str,
+    parameter_schema: dict[str, dict[str, Any]],
+    dut_records: list[dict[str, Any]],
+    layer_roles: dict[str, dict[str, int]],
+    sealed_holdout_dut_ids: list[str],
+    expected_dbu_um: float | None = None,
+    klayout_executable: str | None = None,
+) -> McpToolResult:
+    """Onboard a labeled multi-DUT corpus and return coverage/clarification gates."""
+
+    try:
+        return onboard_labeled_dut_corpus(
+            source_layout_path=source_layout_path,
+            technology_identity=technology_identity,
+            device_family=device_family,
+            topology=topology,
+            parameter_schema=parameter_schema,
+            dut_records=dut_records,
+            layer_roles=layer_roles,
+            sealed_holdout_dut_ids=sealed_holdout_dut_ids,
+            package_root=_onboarding_roots()["corpora"],
+            expected_dbu_um=expected_dbu_um,
+            klayout_executable=klayout_executable,
+        )
+    except AnalysisError as exc:
+        return exc.to_result()
+
+
+@protocol_tool(mcp, annotations=ADDITIVE_WRITE)
+def resolve_transistor_corpus(
+    corpus_sha256: str,
+    decisions: dict[str, str],
+    resolved_by: str,
+    resolved_at: str,
+) -> McpToolResult:
+    """Record explicit human choices for every same-parameter geometry variation."""
+
+    try:
+        roots = _onboarding_roots()
+        return resolve_labeled_corpus(
+            corpus_package_path=_content_package(roots["corpora"], corpus_sha256),
+            decisions=decisions,
+            resolution_root=roots["resolutions"],
+            resolved_by=resolved_by,
+            resolved_at=resolved_at,
+        )
+    except AnalysisError as exc:
+        return exc.to_result()
+
+
+@protocol_tool(mcp, annotations=ADDITIVE_WRITE)
+def score_transistor_adapter(
+    corpus_sha256: str,
+    reproduced_layout_path: str,
+    reproduced_cell_by_dut_id: dict[str, str],
+    scoring_policy: dict[str, Any],
+    compiler_identity: dict[str, Any],
+    klayout_executable: str | None = None,
+) -> McpToolResult:
+    """Score actual reproduced train/holdout cells without claiming foundry legality."""
+
+    try:
+        roots = _onboarding_roots()
+        return score_labeled_corpus(
+            corpus_package_path=_content_package(roots["corpora"], corpus_sha256),
+            reproduced_layout_path=reproduced_layout_path,
+            reproduced_cell_by_dut_id=reproduced_cell_by_dut_id,
+            scoring_policy=scoring_policy,
+            scorecard_root=roots["scorecards"],
+            compiler_identity=compiler_identity,
+            klayout_executable=klayout_executable,
+        )
+    except AnalysisError as exc:
+        return exc.to_result()
+
+
+@protocol_tool(mcp, annotations=ADDITIVE_WRITE)
+def build_transistor_adapter_candidate(
+    corpus_sha256: str,
+    resolution_sha256: str,
+    scorecard_sha256: str,
+    adapter_identity: dict[str, Any],
+    compiler_code_sha256: str,
+) -> McpToolResult:
+    """Build a scored, immutable candidate package that remains nonproduction."""
+
+    try:
+        roots = _onboarding_roots()
+        return build_adapter_candidate(
+            corpus_package_path=_content_package(roots["corpora"], corpus_sha256),
+            resolution_package_path=_content_package(roots["resolutions"], resolution_sha256),
+            scorecard_package_path=_content_package(roots["scorecards"], scorecard_sha256),
+            adapter_identity=adapter_identity,
+            compiler_code_sha256=compiler_code_sha256,
+            adapter_root=roots["adapters"],
+        )
+    except AnalysisError as exc:
+        return exc.to_result()
+
+
+@protocol_tool(mcp, annotations=ADDITIVE_WRITE)
+def register_transistor_adapter_candidate(candidate_sha256: str) -> McpToolResult:
+    """Register an immutable candidate by exact identity/hash without qualifying it."""
+
+    try:
+        roots = _onboarding_roots()
+        package_path = _content_package(roots["adapters"], candidate_sha256) / "package.json"
+        try:
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AnalysisError(
+                code="TECH_ADAPTER_CANDIDATE_NOT_FOUND",
+                message="The exact candidate package is missing or unreadable.",
+                details={"field": "candidate_sha256", "value": candidate_sha256, "error_type": type(exc).__name__, "stage": "adapter_registration"},
+                next_action="Use the exact hash returned by build_transistor_adapter_candidate.",
+            ) from exc
+        host = _default_host_components()
+        registered = host.technology_registry.register_package(package)
+        snapshot = host.technology_registry.snapshot()
+        return {
+            **registered,
+            "registry_snapshot_sha256": snapshot["snapshot_sha256"],
+            "qualified": False,
+            "production_ready": False,
+            "next_gate": "Attach reviewed lifecycle evidence, then complete foundry DRC/LVS/PEX qualification.",
+        }
+    except AnalysisError as exc:
+        return exc.to_result()
+
+
+@protocol_tool(mcp, annotations=ADDITIVE_WRITE)
 def teg_intake(
     design_intent_draft: Annotated[
         DesignIntentDraftInput | None,
@@ -469,6 +790,22 @@ def teg_intake(
         str | None,
         Field(description="Optional stable job id; omit for a content-derived id."),
     ] = None,
+    draft_id: Annotated[
+        str | None,
+        Field(description="Stable immutable draft stream ID for correction/resume."),
+    ] = None,
+    expected_draft_revision: Annotated[
+        int | None,
+        Field(description="Last observed immutable draft revision; stale updates fail closed."),
+    ] = None,
+    resume_token: Annotated[
+        str | None,
+        Field(description="Content-bound token returned by the previous intake revision."),
+    ] = None,
+    validate_only: Annotated[
+        bool,
+        Field(description="Validate without persisting a draft or creating a job."),
+    ] = False,
     template_process_profile: Annotated[
         str | None,
         Field(description="Exact profile for template mode, never inferred."),
@@ -488,6 +825,10 @@ def teg_intake(
         return _default_teg_workflow_facade().teg_intake(
             design_intent_draft=design_intent_draft,
             job_id=job_id,
+            draft_id=draft_id,
+            expected_draft_revision=expected_draft_revision,
+            resume_token=resume_token,
+            validate_only=validate_only,
             template_process_profile=template_process_profile,
             template_process_version=template_process_version,
             template_family=template_family,
@@ -558,11 +899,13 @@ def teg_verify(
     job_id: str,
     approval_reference: ApprovalReferenceInput,
     measurement_manifest: Annotated[
-        MeasurementManifestInput | None,
+        dict[str, Any] | None,
         Field(
             description=(
-                "Optional MeasurementManifest. When supplied, teg_verify freshly hashes "
-                "the final layout and persists the package only on an exact match."
+                "Optional MeasurementManifest JSON object obtained from the intake/job "
+                "contract. Server-side validation returns exact field paths and fixes. "
+                "When supplied, teg_verify freshly hashes the final layout and persists "
+                "the package only on an exact match."
             )
         ),
     ] = None,
@@ -570,8 +913,9 @@ def teg_verify(
         list[dict[str, Any]] | None,
         Field(
             description=(
-                "Optional exact {adapter_id,report_name,kind} records. The host must have "
-                "a trusted adapter registry/report root; bind after MeasurementManifest."
+                "Optional exact {adapter_id,report_name,kind} records selecting pre-existing "
+                "reports. The MCP does not execute DRC/LVS/PEX. The host must have a trusted "
+                "adapter registry/report root; binding never means production_ready."
             )
         ),
     ] = None,
@@ -612,11 +956,14 @@ def plan_staged_mesh_segment(
     cell: str = "ROUTE",
     layer_role: str = "m1",
 ) -> McpToolResult:
-    """Compile a maximum-envelope staged mesh in exact integer DBU.
+    """Compile one straight orthogonal staged-mesh segment in exact integer DBU.
 
     The caller must supply a confirmed obstacle-free corridor and process rules.
-    This tool fails closed rather than returning a token single rail, and its
-    geometric maximization result is not an extracted-resistance claim.
+    Rail occupancy is maximized only inside that supplied corridor under the
+    declared width/space subset. This tool performs no obstacle discovery,
+    bend/global-net routing, full-PDK legality check, or Phase 1 integration.
+    It fails closed rather than returning a token single rail, and its geometry
+    is not an extracted-resistance claim.
     """
 
     try:
@@ -659,7 +1006,10 @@ def plan_maximum_contact_array(
     contact_layer_role: str = "contact",
     metal_layer_role: str = "m1",
 ) -> McpToolResult:
-    """Pack the maximum legal one-dimensional terminal contact array."""
+    """Pack a maximum 1-D contact count under only the supplied local constraints.
+
+    This is not a transistor adapter, full-PDK legality check, or DRC result.
+    """
 
     try:
         return compile_maximum_contact_array(
@@ -688,7 +1038,12 @@ def plan_maximum_contact_array(
 def plan_direct_measurement_teg(
     device_families: Annotated[
         list[str] | None,
-        Field(description="Phase 1 families: transistor, resistor, and/or capacitor."),
+        Field(
+            description=(
+                "Intake/planning families only: transistor, resistor, and/or capacitor. "
+                "This tool draws nothing and supplies no stock transistor adapter."
+            )
+        ),
     ] = None,
     process_profile: Annotated[
         str | None,
@@ -747,7 +1102,12 @@ def plan_direct_measurement_teg(
     ] = None,
     routing_connections: Annotated[
         list[dict[str, Any]] | None,
-        Field(description="Direct net routes with net/start_um/end_um/width_um/clear_space_um."),
+        Field(
+            description=(
+                "Centerline-feasibility records with net/start_um/end_um/width_um/clear_space_um; "
+                "not compiled mesh geometry."
+            )
+        ),
     ] = None,
     routing_obstacles_um: Annotated[
         list[list[float]] | None,
@@ -943,7 +1303,11 @@ def plan_phase1_terminal_routes(
     pad_height_um: float = 40.0,
     extra_obstacles_um: list[list[float]] | None = None,
 ) -> McpToolResult:
-    """Derive terminal/Pad endpoints and non-target keepouts before M1 search."""
+    """Plan centerline feasibility to synthetic Pad centers before M1 search.
+
+    Pad centers/boxes come from frame and count parameters. This tool does not
+    inspect or preserve pad GDS/OAS and does not compile mesh geometry.
+    """
 
     try:
         return build_phase1_terminal_routes(
@@ -974,7 +1338,11 @@ def guide_phase1_direct_workflow(
     layout_plan: dict[str, Any] | None = None,
     generation_result: dict[str, Any] | None = None,
 ) -> McpToolResult:
-    """Validate Phase 1 handoffs and return exactly one next tool/action."""
+    """Guide nonproduction Phase 1 handoffs and return one next tool/action.
+
+    Stock transistor requests intentionally stop at primitive geometry without
+    a process adapter; later stages synthesize Pads and use centerline routes.
+    """
 
     try:
         return build_phase1_workflow_guide(
@@ -1001,7 +1369,12 @@ def plan_phase1_direct_teg_layout(
     primitive_instances: list[dict[str, Any]],
     pad_rail_width_um: float,
 ) -> McpToolResult:
-    """Compose 25 Pads, verified DUT primitives, and first-metal routes before writing."""
+    """Compose a nonproduction synthetic Phase 1 layout before writing.
+
+    The composer creates first-metal PAD_MESH cells, accepts injected verified
+    primitives, and compiles bounded route polylines into multi-rail meshes. It does not
+    import/preserve a pad macro in this legacy Phase 1 entrypoint.
+    """
 
     try:
         return compose_phase1_direct_layout(
@@ -1024,11 +1397,22 @@ def generate_phase1_direct_teg(
     request_plan: dict[str, Any],
     primitive_instances: list[dict[str, Any]],
     pad_rail_width_um: float,
-    confirm_nonproduction: bool = False,
+    confirm_nonproduction: Annotated[
+        bool,
+        Field(
+            description=(
+                "Acknowledges synthetic Pads, multi-rail DUT-to-Pad mesh routes, and the "
+                "absence of a stock transistor adapter/real padset/mesh E2E."
+            )
+        ),
+    ] = False,
     klayout_executable: str | None = None,
     timeout_seconds: float = 120.0,
 ) -> McpToolResult:
-    """Atomically generate and fresh-reload a planned 25-Pad Phase 1 direct TEG."""
+    """Generate/fresh-reload the nonproduction synthetic Phase 1 scaffold.
+
+    This is not a real transistor, preserved padset, or long-route mesh TEG.
+    """
 
     try:
         return generate_phase1_direct_teg_service(
@@ -1050,7 +1434,13 @@ def generate_phase1_direct_teg(
 def draw_manhattan_layout(
     output_layout_path: Annotated[
         str,
-        Field(description="New .gds or .oas path. Existing files are never overwritten."),
+        Field(
+            description=(
+                "New .gds or .oas path. Existing targets are preserved. Concurrent local writers "
+                "to the same target use create-only publication: exactly one wins and losers return "
+                "OUTPUT_ALREADY_EXISTS without deleting or replacing the winner."
+            )
+        ),
     ],
     dbu_um: Annotated[
         float,
@@ -1091,7 +1481,7 @@ def draw_manhattan_layout(
     klayout_executable: str | None = None,
     timeout_seconds: float = 60.0,
 ) -> McpToolResult:
-    """Create one atomic, deterministic, general-purpose Manhattan GDS/OAS layout."""
+    """Create one deterministic Manhattan layout with local no-clobber publication."""
 
     try:
         reference_root = reference_library_root or str(default_reference_library_root())
@@ -1477,7 +1867,10 @@ def assemble_teg(
     klayout_executable: str | None = None,
     timeout_seconds: float = 60.0,
 ) -> McpToolResult:
-    """Export selected DUT sites on the fixed 25-Pad non-production scaffold."""
+    """Export conceptual DUT sites on a fixed 25-Pad nonproduction scaffold.
+
+    This conceptual assembly is not a fallback for the missing Phase 1 process adapter.
+    """
 
     try:
         return assemble_teg_service(
@@ -1576,7 +1969,7 @@ def verify_design_rules(
 
 @protocol_tool(mcp, annotations=READ_ONLY)
 def describe_dut_pcell() -> McpToolResult:
-    """Return the abstract DUT PCell parameter and S/D/G/B terminal contract."""
+    """Return the conceptual DUT scaffold contract, not a process PCell adapter."""
 
     return describe_dut_pcell_contract()
 
@@ -1628,7 +2021,11 @@ def generate_dut_geometry(
         ),
     ] = None,
 ) -> McpToolResult:
-    """Generate a non-production DUT geometry scaffold and terminal stubs."""
+    """Generate a synthetic nonproduction DUT scaffold and terminal stubs.
+
+    Synthetic contact/device dimensions are for contract and UI testing only;
+    this result cannot satisfy the Phase 1 transistor-adapter requirement.
+    """
 
     try:
         confirmed_semantics = confirm_dimension_semantics(dimension_semantics)
@@ -1932,12 +2329,17 @@ def extract_layout_style(
     ] = 24,
     output_profile_path: Annotated[
         str | None,
-        Field(description="Optional new .json path for the extracted content-addressed profile."),
+        Field(
+            description=(
+                "Optional new .json path for the extracted content-hashed profile. Existing targets "
+                "are never replaced; same-target concurrent writers preserve the first winner."
+            )
+        ),
     ] = None,
     klayout_executable: str | None = None,
     timeout_seconds: float = 120.0,
 ) -> McpToolResult:
-    """Extract hierarchy and geometry style observations without inferring rules or nets."""
+    """Extract style observations and optionally publish a create-only JSON profile."""
 
     try:
         return extract_layout_style_service(
@@ -2059,7 +2461,13 @@ def define_pcellizer_parameter(
         str, Field(description="Exact hash returned by inspect_pcellizer_snapshot.")
     ],
     parameter_name: Annotated[
-        str, Field(description="Safe Python/KLayout PCell parameter identifier.")
+        str,
+        Field(
+            description=(
+                "Portable recipe parameter key. The current workflow does not emit a "
+                "reusable KLayout PCell declaration or library."
+            )
+        ),
     ],
     min_um: Annotated[float, Field(description="Confirmed minimum value in microns.")],
     nominal_um: Annotated[
@@ -2182,7 +2590,11 @@ def generate_pcellizer_split_batch(
     klayout_executable: str | None = None,
     timeout_seconds: float = 180.0,
 ) -> McpToolResult:
-    """Atomically generate one standalone GDS per row with fresh-reload verification."""
+    """Generate one static standalone GDS per row with fresh-reload verification.
+
+    Verification covers file integrity and the requested direct-box dimension;
+    it does not prove DRC/LVS/PEX or dependent-shape/device correctness.
+    """
 
     try:
         return generate_pcellizer_split_batch_service(
@@ -2603,7 +3015,11 @@ async def configure_tool_mode(mode: str) -> list[str]:
 
 
 def main() -> None:
-    asyncio.run(configure_tool_mode(os.environ.get("KLAYOUT_MCP_TOOL_MODE", "expert")))
+    deployment_configured = bool(os.environ.get("KLAYOUT_MCP_DEPLOYMENT_TOML"))
+    if deployment_configured:
+        _default_host_components()
+    default_mode = "facade" if deployment_configured else "drawing"
+    asyncio.run(configure_tool_mode(os.environ.get("KLAYOUT_MCP_TOOL_MODE", default_mode)))
     mcp.run(transport="stdio")
 
 

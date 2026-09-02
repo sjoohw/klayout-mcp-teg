@@ -11,6 +11,11 @@ import tempfile
 from typing import Any, Mapping
 
 from .errors import AnalysisError
+from .file_publication import (
+    OutputAlreadyExistsError,
+    publication_staging_prefix,
+    publish_new_directory,
+)
 from .klayout_adapter import run_klayout_worker
 from .pcellizer_batch import validate_pcellizer_split_batch_plan
 from .pcellizer_recipe import validate_pcellizer_single_shape_recipe
@@ -156,10 +161,8 @@ def generate_pcellizer_split_batch_service(
         )
     root = Path(output_root).expanduser().resolve()
     batches_root = root / "pcellizer-batches"
-    staging_root = root / ".pcellizer-staging"
     try:
         batches_root.mkdir(parents=True, exist_ok=True)
-        staging_root.mkdir(parents=True, exist_ok=True)
         final_dir = batches_root / validated_plan["pcellizer_batch_plan_sha256"]
         if final_dir.is_dir():
             existing = inspect_pcellizer_batch_package(batch_dir=str(final_dir))
@@ -172,7 +175,12 @@ def generate_pcellizer_split_batch_service(
                     "Existing plan-addressed batch belongs to a different source chain.",
                 )
             return existing
-        staging = Path(tempfile.mkdtemp(prefix="batch-", dir=staging_root))
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=publication_staging_prefix("pcellizer-batch", directory=True),
+                dir=batches_root,
+            )
+        )
     except OSError as exc:
         _fail(
             "PCELLIZER_BATCH_OUTPUT_ROOT_FAILED",
@@ -237,10 +245,8 @@ def generate_pcellizer_split_batch_service(
         (staging / "batch_plan.json").write_bytes(canonical_json_bytes(validated_plan))
         (staging / "batch_manifest.json").write_bytes(canonical_json_bytes(manifest))
         try:
-            os.replace(staging, final_dir)
-        except OSError:
-            if not final_dir.is_dir():
-                raise
+            publish_new_directory(staging, final_dir)
+        except OutputAlreadyExistsError:
             shutil.rmtree(staging)
         return inspect_pcellizer_batch_package(batch_dir=str(final_dir))
     except Exception:

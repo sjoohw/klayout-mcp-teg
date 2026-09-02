@@ -42,13 +42,17 @@ def test_mcp_baseline_snapshot_is_secret_free_and_schema_stable(tmp_path) -> Non
     snapshot = asyncio.run(evaluation.collect_mcp_snapshot(PROJECT_ROOT))
     baseline = evaluation.build_baseline(PROJECT_ROOT, snapshot, agy_command="agy")
 
-    assert baseline["mcp"]["tool_count"] == 56
+    assert baseline["mcp"]["tool_count"] == 64
     assert baseline["initialize_instruction_matches_source"] is True
     assert baseline["credentials"]["api_key_required"] is False
     assert baseline["credentials"]["secret_values_recorded"] is False
     assert baseline["model_contract"]["include_thoughts"] is False
     assert baseline["scenarios"]["S1"]["expected_first_tools"] == ["server_status"]
     assert baseline["evaluation_goal"]["proxy_equivalence_claimed"] is False
+    assert baseline["evaluation_goal"]["qualification_claim"] == "none"
+    assert baseline["evaluation_goal"]["actual_model_under_test"] is None
+    assert baseline["write_tool_contract"]["matches_scenario_guard"] is True
+    assert baseline["scoring_boundaries"]["completed_tool_result_checked"] is False
     assert baseline["runner"]["is_evaluation_target"] is False
     assert baseline["runner"]["dangerous_skip_permissions_used"] is False
 
@@ -58,6 +62,17 @@ def test_mcp_baseline_snapshot_is_secret_free_and_schema_stable(tmp_path) -> Non
     assert written["mcp"]["tools_sha256"] == baseline["mcp"]["tools_sha256"]
     with pytest.raises(FileExistsError):
         evaluation._atomic_write_json(output, baseline)
+
+
+def test_write_tool_guard_matches_live_mcp_annotations() -> None:
+    snapshot = asyncio.run(evaluation.collect_mcp_snapshot(PROJECT_ROOT))
+
+    observed = evaluation.annotated_write_tools(snapshot)
+
+    assert observed == evaluation.WRITE_TOOLS
+    assert len(observed) == 25
+    assert "teg_verify" in observed
+    assert "generate_dut_geometry" not in observed
 
 
 def _successful_stream() -> str:

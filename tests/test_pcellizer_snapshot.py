@@ -1,12 +1,14 @@
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
-import os
 import shutil
 from pathlib import Path
+import threading
 
 import pytest
 
 from klayout_mcp.errors import AnalysisError
+from klayout_mcp.file_publication import OutputAlreadyExistsError
 from klayout_mcp.pcellizer_contract import (
     build_selection_manifest,
     build_source_layout_identity,
@@ -99,6 +101,67 @@ def test_snapshot_is_content_addressed_and_idempotent(tmp_path) -> None:
     )
 
 
+def test_concurrent_snapshot_recovery_is_idempotent_for_same_content(tmp_path) -> None:
+    source_path = tmp_path / "source.gds"
+    source_bytes = b"same-recovery-content"
+    source_path.write_bytes(source_bytes)
+    package = create_pcellizer_snapshot_package(
+        capture=_capture(source_path), package_root=str(tmp_path / "store")
+    )
+    output = tmp_path / "recovered.gds"
+    barrier = threading.Barrier(2)
+
+    def recover() -> dict:
+        barrier.wait()
+        return recover_pcellizer_snapshot_source(
+            package_dir=package["package_dir"], output_path=str(output)
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: recover(), range(2)))
+
+    assert all(result["ok"] is True for result in results)
+    assert output.read_bytes() == source_bytes
+    assert list(tmp_path.glob(".klayout-stage-file-pcellizer-recovery-*")) == []
+
+
+def test_concurrent_snapshot_recovery_rejects_different_content_without_clobber(
+    tmp_path,
+) -> None:
+    packages = []
+    source_bytes = (b"recovery-writer-one", b"recovery-writer-two")
+    for index, payload in enumerate(source_bytes):
+        source_path = tmp_path / f"source-{index}.gds"
+        source_path.write_bytes(payload)
+        packages.append(
+            create_pcellizer_snapshot_package(
+                capture=_capture(source_path),
+                package_root=str(tmp_path / f"store-{index}"),
+            )
+        )
+    output = tmp_path / "recovered-race.gds"
+    barrier = threading.Barrier(2)
+
+    def recover(index: int) -> str:
+        barrier.wait()
+        try:
+            recover_pcellizer_snapshot_source(
+                package_dir=packages[index]["package_dir"], output_path=str(output)
+            )
+        except AnalysisError as exc:
+            assert exc.code == "PCELLIZER_RECOVERY_TARGET_EXISTS"
+            return "conflict"
+        return "published"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(recover, range(2)))
+
+    assert outcomes.count("published") == 1
+    assert outcomes.count("conflict") == 1
+    assert output.read_bytes() in source_bytes
+    assert list(tmp_path.glob(".klayout-stage-file-pcellizer-recovery-*")) == []
+
+
 def test_snapshot_rejects_source_changed_after_capture(tmp_path) -> None:
     source_path = tmp_path / "source.gds"
     source_path.write_bytes(b"version-one")
@@ -175,17 +238,16 @@ def test_concurrent_same_hash_directory_collision_is_idempotent(
     source_path = tmp_path / "source.gds"
     source_path.write_bytes(b"concurrent-layout")
     capture = _capture(source_path)
-    real_replace = os.replace
-
-    def competing_replace(staging, final):
+    def competing_publish(staging, final):
         shutil.copytree(staging, final)
-        raise PermissionError("simulated Windows directory collision")
+        raise OutputAlreadyExistsError("simulated directory collision")
 
-    monkeypatch.setattr("klayout_mcp.pcellizer_snapshot.os.replace", competing_replace)
+    monkeypatch.setattr(
+        "klayout_mcp.pcellizer_snapshot.publish_new_directory", competing_publish
+    )
     result = create_pcellizer_snapshot_package(
         capture=capture, package_root=str(tmp_path / "store")
     )
-    monkeypatch.setattr("klayout_mcp.pcellizer_snapshot.os.replace", real_replace)
 
     assert result["ok"] is True
     assert Path(result["package_dir"]).is_dir()

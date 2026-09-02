@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from pathlib import Path
 import subprocess
+import threading
 
 import pytest
 
@@ -468,3 +470,67 @@ def test_conceptual_assembly_roundtrip_is_truthful_and_non_destructive(
         {"cell_name": "DUT_VARIANT_003", "geometry_xor_clean": True},
     ]
     assert hashlib.sha256(padset.read_bytes()).hexdigest() == input_before
+
+
+def test_conceptual_assembly_concurrent_same_target_preserves_one_winner(
+    tmp_path,
+) -> None:
+    try:
+        executable = find_klayout_executable()
+    except Exception:
+        pytest.skip("KLayout executable is not installed")
+
+    padset = tmp_path / "padset.gds"
+    layermap = tmp_path / "layers.yaml"
+    output = tmp_path / "conceptual-race.gds"
+    fixture_script = Path(__file__).parent / "fixtures" / "create_synthetic_padset.py"
+    completed = subprocess.run(
+        [
+            str(executable),
+            "-b",
+            "-r",
+            str(fixture_script),
+            "-rd",
+            f"output_path={padset}",
+            "-rd",
+            "landing_routes=1",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    layermap.write_text(
+        """layers:
+  m1: [10, 2]
+  active: [1, 0]
+  poly: [2, 0]
+  contact: [3, 0]
+  text: [100, 0]
+""",
+        encoding="utf-8",
+    )
+    barrier = threading.Barrier(2)
+
+    def generate() -> dict:
+        barrier.wait()
+        return assemble_teg(
+            str(padset),
+            str(layermap),
+            str(output),
+            [{"l_um": 0.12}],
+            confirm_conceptual_export=True,
+            dimension_semantics=DEVICE_SPECIFIC_W_L,
+            klayout_executable=str(executable),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: generate(), range(2)))
+
+    assert sum(result["ok"] is True for result in results) == 1
+    loser = next(result for result in results if result["ok"] is False)
+    assert loser["code"] == "OUTPUT_ALREADY_EXISTS"
+    assert output.is_file()
+    assert output.stat().st_size > 0
+    assert list(tmp_path.glob(".klayout-stage-file-assembly-*.gds")) == []

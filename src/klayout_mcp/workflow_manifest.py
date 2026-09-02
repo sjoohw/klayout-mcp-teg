@@ -34,6 +34,7 @@ DESIGN_INTENT_REQUIRED_FIELDS = frozenset(
         "unresolved_questions",
     }
 )
+DESIGN_INTENT_OPTIONAL_FIELDS = frozenset({"technology_adapter"})
 APPROVAL_REFERENCE_REQUIRED_FIELDS = frozenset(
     {
         "schema_version",
@@ -419,6 +420,7 @@ def validate_design_intent_draft(document: Mapping[str, Any]) -> dict[str, Any]:
         draft,
         field="DesignIntentDraft",
         required=set(DESIGN_INTENT_REQUIRED_FIELDS),
+        optional=set(DESIGN_INTENT_OPTIONAL_FIELDS),
     )
     _string(draft["intent_id"], field="intent_id")
     if draft["units"] != "um":
@@ -434,6 +436,33 @@ def validate_design_intent_draft(document: Mapping[str, Any]) -> dict[str, Any]:
         field="process",
         required={"profile", "version", "capability_sha256"},
     )
+    if "technology_adapter" in draft:
+        adapter = _mapping(draft["technology_adapter"], field="technology_adapter")
+        _require_keys(
+            adapter,
+            field="technology_adapter",
+            required={"identity", "package_sha256", "registry_snapshot_sha256"},
+        )
+        identity = _mapping(adapter["identity"], field="technology_adapter.identity")
+        _require_keys(
+            identity,
+            field="technology_adapter.identity",
+            required={
+                "technology",
+                "pdk_revision",
+                "adapter_kind",
+                "device_family",
+                "topology",
+                "package_version",
+            },
+        )
+        for key, value in identity.items():
+            _string(value, field=f"technology_adapter.identity.{key}")
+        _sha256(adapter["package_sha256"], field="technology_adapter.package_sha256")
+        _sha256(
+            adapter["registry_snapshot_sha256"],
+            field="technology_adapter.registry_snapshot_sha256",
+        )
     _string(process["profile"], field="process.profile")
     _string(process["version"], field="process.version")
     _sha256(process["capability_sha256"], field="process.capability_sha256")

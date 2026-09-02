@@ -1,4 +1,4 @@
-"""High-level atomic generation service for planned Phase 1 direct TEG layouts."""
+"""High-level create-only generation for nonproduction Phase 1 scaffolds."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def generate_phase1_direct_teg_service(
     timeout_seconds: float,
     drawing_runner: Callable[..., dict[str, Any]] = draw_manhattan_layout_service,
 ) -> dict[str, Any]:
-    """Compose, atomically draw, and attach Phase 1 verification provenance."""
+    """Compose, publish without clobbering a concurrent winner, and attach provenance."""
 
     composition = compose_phase1_direct_layout(
         output_layout_path=output_layout_path,

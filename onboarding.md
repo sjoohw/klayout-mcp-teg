@@ -1,8 +1,14 @@
 # Target Process Onboarding
 
 이 문서는 실제 사용환경에서 이 MCP를 처음 운용하는 LLM을 위한 실행 절차다. 이 저장소에는
-fabrication process profile이 내장되어 있지 않다. 예제 GDS, 이름이 비슷한 layer, display color,
+production/fabrication-approved process profile이 내장되어 있지 않다. Persistent facade의
+research-only Kelvin demo profile은 target PDK가 아니다. 예제 GDS, 이름이 비슷한 layer, display color,
 다른 node의 rule 또는 LLM의 상식으로 공정값을 채우지 않는다.
+
+> 이 문서는 target-process adapter를 **준비하기 위한 입력 계약**이다. 현재 checkout은 profile 사실을
+> 수집·검증할 수 있지만 stock만으로 transistor pilot까지 완료할 수 없다. 실제 transistor adapter,
+> pad-macro-preserving Phase 1 composer와 Phase 1 mesh integration이 없기 때문이다. 현재 구현 경계는
+> [docs/current-capability-boundaries.md](docs/current-capability-boundaries.md)를 따른다.
 
 ## 완료 조건
 
@@ -161,6 +167,8 @@ Placeholder를 실제 승인값으로 바꾸고 `validate_process_capability_pro
 
 JSON 예시의 terminal 이름은 organization preset과 맞춰야 한다. Verification 상태는 선택적
 evidence 설명이며 세 항목이 모두 `approved`여도 capability 자체는 `production_ready=false`다.
+`geometry_source` enum을 채우는 것 역시 callable adapter가 설치·등록·검증됐다는 증거가 아니다.
+Adapter identity/version/hash와 실제 materialization evidence가 별도로 필요하다.
 
 Validation error는 원인을 고친 뒤 같은 semantic profile을 새 revision/hash로 다시 검증한다.
 Layer collision, off-grid manufacturing grid, 누락 device role 또는 빈 spacing table을 임의로 완화하지 않는다.
@@ -186,7 +194,10 @@ Adapter acceptance:
 Adapter가 없으면 LLM은 “transistor primitive adapter 미구현”을 보고하고 resistor/capacitor 또는
 read-only reference 분석처럼 가능한 작업만 계속한다.
 
-## 6. TEG 기본 drawing contract를 확인한다
+## 6. Target TEG drawing contract를 확인한다
+
+이 절은 adapter와 composer가 충족해야 할 acceptance 조건이다. Stock Phase 1의 현재 동작 설명이
+아니며, 현재 composer는 실제 pad macro나 standalone mesh result를 입력받지 않는다.
 
 - Routing은 horizontal/vertical Manhattan만 허용하며 diagonal은 사용하지 않는다.
 - 측정 metal 이외의 장거리 routing은 넓은 parallel rail과 repeated cross-tie mesh를 사용한다.
@@ -211,6 +222,10 @@ Transistor context의 organization default:
 reference와 사용자 승인으로 보완한다.
 
 ## 7. Representative pilot을 수행한다
+
+이 단계는 stock에서 보장하는 turnkey 절차가 아니라 외부 process adapter/composer/router를 검증하는
+acceptance gate다. Transistor adapter, 실제 pad macro 보존과 mesh-aware routing이 준비되지 않았다면
+`not_ready`로 끝내고 conceptual scaffold로 대체하지 않는다.
 
 전체 split 전에 가장 작은 pilot으로 다음을 확인한다.
 
