@@ -12,7 +12,8 @@ from typing import Any, Callable, Mapping
 from .approval import ApprovalVerifier
 from .errors import AnalysisError
 from .external_evidence import ExternalEvidenceAdapterRegistry, SignoffPolicy
-from .technology_registry import TechnologyAdapterRegistry
+from .qualification_policy import QualificationPolicyAuthority
+from .technology_registry import LifecycleTrustAnchor, TechnologyAdapterRegistry
 from .verification_runner import (
     ExternalVerificationRunnerRegistry,
     execute_external_verification,
@@ -41,6 +42,8 @@ COMPONENT_NAMES = (
     "external_verification_runner_registry",
     "signoff_policy",
     "pad_macro_registry",
+    "qualification_policy_authority",
+    "lifecycle_trust_anchor",
 )
 HOST_COMPONENT_ENTRYPOINT_GROUP = "klayout_mcp.host_components"
 
@@ -118,6 +121,8 @@ class HostComponents:
     external_verification_runner_registry: ExternalVerificationRunnerRegistry | None = None
     signoff_policy: SignoffPolicy | None = None
     pad_macro_registry: Any = None
+    qualification_policy_authority: QualificationPolicyAuthority | None = None
+    lifecycle_trust_anchor: LifecycleTrustAnchor | None = None
     external_report_root: Path | None = None
     output_class: str = "nonproduction_gds"
     production_mode: bool = True
@@ -197,6 +202,14 @@ class HostComponents:
             "approval_verifier_configured": approval_ready,
             "process_provider_configured": provider_ready,
             "technology_registry": self.technology_registry.contract(),
+            "adapter_qualification_policy": {
+                "authority_configured": self.qualification_policy_authority is not None,
+                "authority_trusted": getattr(
+                    self.qualification_policy_authority, "trusted", False
+                )
+                is True,
+                "caller_selected_policy_can_qualify_candidate": False,
+            },
             "external_verification_runners": runner_readiness,
             "profile_readiness": profiles,
             "production_mode": self.production_mode,
@@ -360,7 +373,21 @@ def build_host_components_from_config(
     if not isinstance(selected["engine_registry"], WorkflowEngineRegistry):
         selected["engine_registry"] = WorkflowEngineRegistry()
     if not isinstance(selected["technology_registry"], TechnologyAdapterRegistry):
-        selected["technology_registry"] = TechnologyAdapterRegistry(paths.get("technology_registry_root"))
+        selected["technology_registry"] = TechnologyAdapterRegistry(
+            paths.get("technology_registry_root"),
+            lifecycle_trust_anchor=selected["lifecycle_trust_anchor"],
+        )
+    elif (
+        selected["lifecycle_trust_anchor"] is not None
+        and selected["technology_registry"].lifecycle_trust_anchor
+        is not selected["lifecycle_trust_anchor"]
+    ):
+        _fail(
+            "DEPLOYMENT_LIFECYCLE_ANCHOR_NOT_BOUND",
+            "The selected technology registry is not bound to the selected lifecycle trust anchor.",
+            details={"field": "components.lifecycle_trust_anchor"},
+            next_action="Construct the registry with this exact independent lifecycle anchor, or omit the separate anchor component.",
+        )
     workflow_root = paths.get("workflow_root")
     output_root = paths.get("output_root")
     if not isinstance(workflow_root, str) or not isinstance(output_root, str):
@@ -382,6 +409,10 @@ def build_host_components_from_config(
         ],
         signoff_policy=selected["signoff_policy"],
         pad_macro_registry=selected["pad_macro_registry"],
+        qualification_policy_authority=selected[
+            "qualification_policy_authority"
+        ],
+        lifecycle_trust_anchor=selected["lifecycle_trust_anchor"],
         external_report_root=(
             None
             if paths.get("external_report_root") is None

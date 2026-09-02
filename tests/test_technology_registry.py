@@ -1,9 +1,51 @@
 from pathlib import Path
+import hashlib
 
 import pytest
 
 from klayout_mcp.errors import AnalysisError
 from klayout_mcp.technology_registry import TechnologyAdapterRegistry
+
+
+class IndependentLifecycleLedger:
+    anchor_id = "worm-ledger-v1"
+    trusted = True
+
+    def __init__(self):
+        self.latest = {}
+
+    def append_head(self, *, package_sha256, sequence, record_sha256):
+        receipt_sha256 = hashlib.sha256(
+            f"{package_sha256}:{sequence}:{record_sha256}".encode()
+        ).hexdigest()
+        self.latest[package_sha256] = (sequence, record_sha256, receipt_sha256)
+        return {
+            "anchored": True,
+            "anchor_id": self.anchor_id,
+            "package_sha256": package_sha256,
+            "sequence": sequence,
+            "record_sha256": record_sha256,
+            "anchor_receipt_sha256": receipt_sha256,
+        }
+
+    def verify_head(
+        self,
+        *,
+        package_sha256,
+        sequence,
+        record_sha256,
+        anchor_receipt_sha256,
+    ):
+        current = self.latest.get(package_sha256)
+        return {
+            "verified": current
+            == (sequence, record_sha256, anchor_receipt_sha256),
+            "anchor_id": self.anchor_id,
+            "package_sha256": package_sha256,
+            "sequence": sequence,
+            "record_sha256": record_sha256,
+            "anchor_receipt_sha256": anchor_receipt_sha256,
+        }
 
 
 def _package(version: str = "1.0.0", *, compiler: str = "a" * 64):
@@ -210,6 +252,49 @@ def test_registry_restart_rejects_lifecycle_without_trusted_head(
         TechnologyAdapterRegistry(tmp_path)
 
     assert caught.value.code == "TECH_ADAPTER_LIFECYCLE_HEAD_MISSING"
+
+
+def test_external_anchor_rejects_record_and_local_head_rollback(
+    tmp_path: Path,
+) -> None:
+    anchor = IndependentLifecycleLedger()
+    registry = TechnologyAdapterRegistry(
+        tmp_path, lifecycle_trust_anchor=anchor
+    )
+    registered = registry.register_package(_package())
+    registry.append_lifecycle_record(
+        package_sha256=registered["package_sha256"],
+        action="qualified",
+        reason="qualification completed",
+        recorded_at="2026-09-02T10:00:00Z",
+        signer_reference="host-trust://review-board",
+        signature_sha256="e" * 64,
+    )
+    head_path = (
+        tmp_path
+        / "lifecycle_heads"
+        / f"{registered['package_sha256']}.json"
+    )
+    qualified_head = head_path.read_bytes()
+    revoked = registry.append_lifecycle_record(
+        package_sha256=registered["package_sha256"],
+        action="revoked",
+        reason="evidence invalidated",
+        recorded_at="2026-09-02T11:00:00Z",
+        signer_reference="host-trust://review-board",
+        signature_sha256="f" * 64,
+    )
+    (tmp_path / "lifecycle" / f"{revoked['record_sha256']}.json").unlink()
+    head_path.write_bytes(qualified_head)
+
+    with pytest.raises(AnalysisError) as caught:
+        TechnologyAdapterRegistry(tmp_path, lifecycle_trust_anchor=anchor)
+
+    assert caught.value.code == "TECH_ADAPTER_LIFECYCLE_EXTERNAL_ANCHOR_MISMATCH"
+    assert registry.contract()["writer_compromise_rollback_detection"] is True
+    assert TechnologyAdapterRegistry().contract()[
+        "writer_compromise_rollback_detection"
+    ] is False
 
 
 def test_revocation_is_terminal_for_exact_package(tmp_path: Path) -> None:

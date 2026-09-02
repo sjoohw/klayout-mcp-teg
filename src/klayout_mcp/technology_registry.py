@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import re
 import uuid
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 from .errors import AnalysisError
 from .file_publication import (
@@ -30,6 +30,27 @@ IDENTITY_FIELDS = (
     "package_version",
 )
 LIFECYCLE_ACTIONS = frozenset({"qualified", "deprecated", "revoked"})
+
+
+@runtime_checkable
+class LifecycleTrustAnchor(Protocol):
+    """Independent append/verify authority supplied by the host deployment."""
+
+    anchor_id: str
+    trusted: bool
+
+    def append_head(
+        self, *, package_sha256: str, sequence: int, record_sha256: str
+    ) -> Mapping[str, Any]: ...
+
+    def verify_head(
+        self,
+        *,
+        package_sha256: str,
+        sequence: int,
+        record_sha256: str,
+        anchor_receipt_sha256: str,
+    ) -> Mapping[str, Any]: ...
 
 
 def _fail(code: str, message: str, *, details: Mapping[str, Any], next_action: str) -> None:
@@ -101,8 +122,26 @@ class TechnologyAdapterKey:
 class TechnologyAdapterRegistry:
     """Append-only package and lifecycle registry with no implicit fallback."""
 
-    def __init__(self, root: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        *,
+        lifecycle_trust_anchor: LifecycleTrustAnchor | None = None,
+    ) -> None:
         self.root = None if root is None else Path(root).expanduser().resolve()
+        self.lifecycle_trust_anchor = lifecycle_trust_anchor
+        if lifecycle_trust_anchor is not None and (
+            not isinstance(lifecycle_trust_anchor, LifecycleTrustAnchor)
+            or lifecycle_trust_anchor.trusted is not True
+            or not isinstance(lifecycle_trust_anchor.anchor_id, str)
+            or not lifecycle_trust_anchor.anchor_id.strip()
+        ):
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_ANCHOR_UNTRUSTED",
+                "The configured lifecycle trust anchor is not a trusted host authority.",
+                details={"anchor_type": type(lifecycle_trust_anchor).__name__},
+                next_action="Configure an independent trusted lifecycle anchor or run explicitly with local-head-only protection.",
+            )
         self._packages: dict[TechnologyAdapterKey, tuple[str, dict[str, Any]]] = {}
         self._lifecycle: list[dict[str, Any]] = []
         if self.root is not None:
@@ -242,23 +281,39 @@ class TechnologyAdapterRegistry:
                 details={"path": str(path), "error_type": type(exc).__name__},
                 next_action="Restore the trusted lifecycle head before starting the registry.",
             )
-        expected_fields = {
+        base_fields = {
             "schema_version",
             "artifact_type",
             "package_sha256",
             "sequence",
             "record_sha256",
         }
+        schema_version = head.get("schema_version") if isinstance(head, dict) else None
+        expected_fields = (
+            base_fields
+            if schema_version == 1
+            else base_fields | {"anchor_id", "anchor_receipt_sha256"}
+        )
         if (
             not isinstance(head, dict)
             or set(head) != expected_fields
-            or head.get("schema_version") != 1
+            or schema_version not in {1, 2}
             or head.get("artifact_type") != "TechnologyAdapterLifecycleHead"
             or not SHA256_PATTERN.fullmatch(str(head.get("package_sha256", "")))
             or isinstance(head.get("sequence"), bool)
             or not isinstance(head.get("sequence"), int)
             or head.get("sequence", 0) < 1
             or not SHA256_PATTERN.fullmatch(str(head.get("record_sha256", "")))
+            or (
+                schema_version == 2
+                and (
+                    not isinstance(head.get("anchor_id"), str)
+                    or not head.get("anchor_id", "").strip()
+                    or not SHA256_PATTERN.fullmatch(
+                        str(head.get("anchor_receipt_sha256", ""))
+                    )
+                )
+            )
         ):
             _fail(
                 "TECH_ADAPTER_LIFECYCLE_HEAD_INVALID",
@@ -279,17 +334,128 @@ class TechnologyAdapterRegistry:
             )
         return head
 
-    def _write_lifecycle_head(
+    def _append_external_lifecycle_head(
         self, *, package_sha256: str, sequence: int, record_sha256: str
+    ) -> dict[str, str] | None:
+        anchor = self.lifecycle_trust_anchor
+        if anchor is None:
+            return None
+        try:
+            receipt = anchor.append_head(
+                package_sha256=package_sha256,
+                sequence=sequence,
+                record_sha256=record_sha256,
+            )
+        except Exception as exc:
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_ANCHOR_FAILED",
+                "The independent lifecycle anchor failed closed while appending a head.",
+                details={"anchor_id": anchor.anchor_id, "error_type": type(exc).__name__},
+                next_action="Restore the independent anchor before appending lifecycle state.",
+            )
+        expected = {
+            "anchored": True,
+            "anchor_id": anchor.anchor_id,
+            "package_sha256": package_sha256,
+            "sequence": sequence,
+            "record_sha256": record_sha256,
+        }
+        mismatches = {
+            name: {"expected": value, "received": receipt.get(name)}
+            for name, value in expected.items()
+            if not isinstance(receipt, Mapping) or receipt.get(name) != value
+        }
+        receipt_sha256 = receipt.get("anchor_receipt_sha256") if isinstance(receipt, Mapping) else None
+        if mismatches or not SHA256_PATTERN.fullmatch(str(receipt_sha256 or "")):
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_ANCHOR_RECEIPT_INVALID",
+                "The independent anchor did not bind the exact lifecycle head.",
+                details={"anchor_id": anchor.anchor_id, "mismatches": mismatches},
+                next_action="Do not update the local head; repair the independent anchor receipt.",
+            )
+        return {
+            "anchor_id": anchor.anchor_id,
+            "anchor_receipt_sha256": str(receipt_sha256),
+        }
+
+    def _verify_external_lifecycle_head(self, head: Mapping[str, Any]) -> None:
+        anchor = self.lifecycle_trust_anchor
+        if head.get("schema_version") == 1:
+            if anchor is not None:
+                _fail(
+                    "TECH_ADAPTER_LIFECYCLE_HEAD_NOT_EXTERNALLY_ANCHORED",
+                    "The configured independent anchor cannot verify a legacy local-only head.",
+                    details={"package_sha256": head.get("package_sha256")},
+                    next_action="Review and explicitly migrate the lifecycle chain into the independent anchor.",
+                )
+            return
+        if anchor is None:
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_ANCHOR_UNAVAILABLE",
+                "An externally anchored lifecycle head cannot be verified by this host.",
+                details={"package_sha256": head.get("package_sha256"), "anchor_id": head.get("anchor_id")},
+                next_action="Restore the configured independent lifecycle anchor before starting the registry.",
+            )
+        if head.get("anchor_id") != anchor.anchor_id:
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_ANCHOR_MISMATCH",
+                "The local lifecycle head belongs to a different independent anchor.",
+                details={"expected": anchor.anchor_id, "received": head.get("anchor_id")},
+                next_action="Use the exact anchor that owns this registry root.",
+            )
+        try:
+            result = anchor.verify_head(
+                package_sha256=str(head["package_sha256"]),
+                sequence=int(head["sequence"]),
+                record_sha256=str(head["record_sha256"]),
+                anchor_receipt_sha256=str(head["anchor_receipt_sha256"]),
+            )
+        except Exception as exc:
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_ANCHOR_FAILED",
+                "The independent lifecycle anchor failed closed during startup verification.",
+                details={"anchor_id": anchor.anchor_id, "error_type": type(exc).__name__},
+                next_action="Restore anchor availability before starting the registry.",
+            )
+        expected = {
+            "verified": True,
+            "anchor_id": anchor.anchor_id,
+            "package_sha256": head["package_sha256"],
+            "sequence": head["sequence"],
+            "record_sha256": head["record_sha256"],
+            "anchor_receipt_sha256": head["anchor_receipt_sha256"],
+        }
+        mismatches = {
+            name: {"expected": value, "received": result.get(name)}
+            for name, value in expected.items()
+            if not isinstance(result, Mapping) or result.get(name) != value
+        }
+        if mismatches:
+            _fail(
+                "TECH_ADAPTER_LIFECYCLE_EXTERNAL_ANCHOR_MISMATCH",
+                "The independent anchor does not recognize this local lifecycle head as current.",
+                details={"anchor_id": anchor.anchor_id, "mismatches": mismatches},
+                next_action="Stop adapter use and restore the externally anchored current lifecycle state.",
+            )
+
+    def _write_lifecycle_head(
+        self,
+        *,
+        package_sha256: str,
+        sequence: int,
+        record_sha256: str,
+        external_receipt: Mapping[str, str] | None,
     ) -> None:
         assert self.root is not None
         head = {
-            "schema_version": 1,
+            "schema_version": 2 if external_receipt is not None else 1,
             "artifact_type": "TechnologyAdapterLifecycleHead",
             "package_sha256": package_sha256,
             "sequence": sequence,
             "record_sha256": record_sha256,
         }
+        if external_receipt is not None:
+            head.update(external_receipt)
         directory = self.root / "lifecycle_heads"
         final = directory / f"{package_sha256}.json"
         temporary = directory / (
@@ -399,6 +565,7 @@ class TechnologyAdapterRegistry:
                     },
                     next_action="Stop adapter use and restore the missing or modified lifecycle record.",
                 )
+            self._verify_external_lifecycle_head(head)
             self._lifecycle.extend(record for _, record in ordered_pairs)
         heads_without_records = sorted(set(lifecycle_heads).difference(lifecycle_records))
         if heads_without_records:
@@ -561,10 +728,16 @@ class TechnologyAdapterRegistry:
         record_sha256 = canonical_sha256(record)
         if self.root is not None:
             self._publish_document(self.root / "lifecycle", record_sha256, record)
+            external_receipt = self._append_external_lifecycle_head(
+                package_sha256=package_sha256,
+                sequence=record["sequence"],
+                record_sha256=record_sha256,
+            )
             self._write_lifecycle_head(
                 package_sha256=package_sha256,
                 sequence=record["sequence"],
                 record_sha256=record_sha256,
+                external_receipt=external_receipt,
             )
         if not any(canonical_sha256(existing) == record_sha256 for existing in self._lifecycle):
             self._lifecycle.append(record)
@@ -662,6 +835,11 @@ class TechnologyAdapterRegistry:
             "append_only_packages": True,
             "append_only_lifecycle": True,
             "lifecycle_trusted_head_required": self.root is not None,
+            "external_lifecycle_anchor_configured": self.lifecycle_trust_anchor
+            is not None,
+            "writer_compromise_rollback_detection": self.lifecycle_trust_anchor
+            is not None,
+            "local_head_only_detects_writer_compromise": False,
             "registered_package_count": len(self._packages),
             "snapshot_content_addressed": True,
         }

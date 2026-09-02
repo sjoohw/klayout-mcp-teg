@@ -449,6 +449,10 @@ def server_status() -> McpToolResult:
             "phase1_dut_to_pad_route_geometry": "bounded_polyline_compiled_to_multi_rail_mesh",
             "phase1_standalone_mesh_compiler_integrated": True,
             "phase1_global_search_budget": "global_node_and_wall_time_budget_enforced",
+            "stock_adapter_qualification_policy_authority": "not_configured",
+            "caller_selected_score_can_qualify_adapter_candidate": False,
+            "stock_lifecycle_external_trust_anchor": "not_configured",
+            "local_lifecycle_head_detects_writer_compromise": False,
             "same_target_concurrent_writers_supported": True,
             "generic_manhattan_same_target_no_clobber": True,
             "exact_gemma4_qualified": False,
@@ -679,6 +683,7 @@ def onboard_transistor_corpus(
     device_family: str,
     topology: str,
     parameter_schema: dict[str, dict[str, Any]],
+    compiler_model_spec: dict[str, Any],
     dut_records: list[dict[str, Any]],
     layer_roles: dict[str, dict[str, int]],
     validation_dut_ids: list[str],
@@ -694,6 +699,7 @@ def onboard_transistor_corpus(
             device_family=device_family,
             topology=topology,
             parameter_schema=parameter_schema,
+            compiler_model_spec=compiler_model_spec,
             dut_records=dut_records,
             layer_roles=layer_roles,
             validation_dut_ids=validation_dut_ids,
@@ -736,7 +742,7 @@ def score_transistor_adapter(
     compiler_identity: dict[str, Any],
     klayout_executable: str | None = None,
 ) -> McpToolResult:
-    """Score a distinct stream; compiler identity pins id/version/code hash, without claiming an execution receipt."""
+    """Score a distinct stream; caller policy is diagnostic unless the host injects its qualification authority."""
 
     try:
         roots = _onboarding_roots()
@@ -747,6 +753,9 @@ def score_transistor_adapter(
             scoring_policy=scoring_policy,
             scorecard_root=roots["scorecards"],
             compiler_identity=compiler_identity,
+            qualification_policy_authority=(
+                _default_host_components().qualification_policy_authority
+            ),
             klayout_executable=klayout_executable,
         )
     except AnalysisError as exc:
@@ -761,7 +770,7 @@ def build_transistor_adapter_candidate(
     adapter_identity: dict[str, Any],
     compiler_code_sha256: str,
 ) -> McpToolResult:
-    """Build a scored, immutable candidate package that remains nonproduction."""
+    """Build a host-policy-approved immutable candidate that remains nonproduction."""
 
     try:
         roots = _onboarding_roots()
@@ -772,6 +781,9 @@ def build_transistor_adapter_candidate(
             adapter_identity=adapter_identity,
             compiler_code_sha256=compiler_code_sha256,
             adapter_root=roots["adapters"],
+            qualification_policy_authority=(
+                _default_host_components().qualification_policy_authority
+            ),
         )
     except AnalysisError as exc:
         return exc.to_result()

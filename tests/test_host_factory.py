@@ -13,6 +13,28 @@ from klayout_mcp.workflow_store import WorkflowEngineRegistry
 from klayout_mcp.verification_runner import ExternalVerificationRunnerRegistry
 
 
+class _QualificationAuthority:
+    authority_id = "qualification-v1"
+    trusted = True
+
+    def issue_policy(self, **kwargs):
+        raise NotImplementedError
+
+    def verify_policy(self, **kwargs):
+        raise NotImplementedError
+
+
+class _LifecycleAnchor:
+    anchor_id = "lifecycle-v1"
+    trusted = True
+
+    def append_head(self, **kwargs):
+        raise NotImplementedError
+
+    def verify_head(self, **kwargs):
+        raise NotImplementedError
+
+
 def _write_deployment(path: Path, body: str) -> Path:
     path.write_text(body, encoding="utf-8")
     return path
@@ -63,6 +85,48 @@ def test_host_factory_uses_only_allowlisted_installed_ids(tmp_path: Path) -> Non
     assert doctor["output_publication"]["supported_filesystem"] is True
     assert doctor["technology_registry"]["wildcard_or_alias_fallback"] is False
     assert doctor["external_verification_runners"]["configured"] is False
+    assert (
+        doctor["adapter_qualification_policy"][
+            "caller_selected_policy_can_qualify_candidate"
+        ]
+        is False
+    )
+
+
+def test_host_factory_binds_host_qualification_and_external_lifecycle_authorities(
+    tmp_path: Path,
+) -> None:
+    qualification_authority = _QualificationAuthority()
+    lifecycle_anchor = _LifecycleAnchor()
+    config = {
+        "schema_version": 1,
+        "paths": {
+            "workflow_root": str(tmp_path / "workflow"),
+            "output_root": str(tmp_path / "output"),
+            "technology_registry_root": str(tmp_path / "technology"),
+        },
+        "security": {"allowed_component_ids": ["qualification-v1", "lifecycle-v1"]},
+        "components": {
+            "qualification_policy_authority": "qualification-v1",
+            "lifecycle_trust_anchor": "lifecycle-v1",
+        },
+    }
+
+    host = build_host_components_from_config(
+        config,
+        installed_factories={
+            "qualification_policy_authority": {
+                "qualification-v1": lambda _: qualification_authority
+            },
+            "lifecycle_trust_anchor": {"lifecycle-v1": lambda _: lifecycle_anchor},
+        },
+    )
+
+    assert host.qualification_policy_authority is qualification_authority
+    assert host.technology_registry.lifecycle_trust_anchor is lifecycle_anchor
+    doctor = host.doctor()
+    assert doctor["adapter_qualification_policy"]["authority_trusted"] is True
+    assert doctor["technology_registry"]["writer_compromise_rollback_detection"] is True
 
 
 def test_host_doctor_separates_report_parser_from_execution_runner(tmp_path: Path) -> None:

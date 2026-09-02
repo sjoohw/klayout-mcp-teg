@@ -19,6 +19,11 @@ from .file_publication import (
     publish_new_directory,
 )
 from .klayout_adapter import create_layout_snapshot, run_klayout_worker
+from .qualification_policy import (
+    QualificationPolicyAuthority,
+    issue_qualification_policy,
+    verify_qualification_policy,
+)
 from .validation_report import ActionableIssue, ClarificationQuestion, ValidationReport
 from .workflow_manifest import canonical_json_bytes, canonical_sha256, immutable_json_copy
 
@@ -301,76 +306,242 @@ def _matrix_rank(rows: list[list[float]], *, tolerance: float = 1e-12) -> int:
     return rank
 
 
+def _validate_compiler_model_spec(
+    model_spec: Mapping[str, Any], *, schema: Mapping[str, Any]
+) -> dict[str, Any]:
+    if not isinstance(model_spec, Mapping):
+        _fail(
+            "DUT_COMPILER_MODEL_SPEC_REQUIRED",
+            "Corpus onboarding requires the exact basis used by the intended compiler.",
+            details={"field": "compiler_model_spec"},
+            next_action="Declare intercept, main, interaction, categorical, and regime basis terms used by the compiler.",
+        )
+    if set(model_spec) != {"schema_version", "basis_terms"} or model_spec.get("schema_version") != 1:
+        _fail(
+            "DUT_COMPILER_MODEL_SPEC_INVALID",
+            "compiler_model_spec must use schema_version 1 and contain only basis_terms.",
+            details={"field": "compiler_model_spec", "keys": sorted(model_spec)},
+            next_action="Use the documented explicit compiler basis schema.",
+        )
+    raw_terms = model_spec.get("basis_terms")
+    if not isinstance(raw_terms, list) or not raw_terms:
+        _fail(
+            "DUT_COMPILER_MODEL_SPEC_INVALID",
+            "The compiler basis must contain at least an intercept and one parameter term.",
+            details={"field": "compiler_model_spec.basis_terms"},
+            next_action="Declare every basis term the compiler will fit or branch on.",
+        )
+    normalized_terms: list[dict[str, Any]] = []
+    term_ids: set[str] = set()
+    referenced_parameters: set[str] = set()
+    intercept_count = 0
+    for index, raw in enumerate(raw_terms):
+        if not isinstance(raw, Mapping):
+            _fail(
+                "DUT_COMPILER_MODEL_TERM_INVALID",
+                "Every compiler basis term must be an object.",
+                details={"field": f"compiler_model_spec.basis_terms[{index}]"},
+                next_action="Correct the compiler basis term schema.",
+            )
+        kind = raw.get("kind")
+        term_id = raw.get("term_id")
+        if (
+            not isinstance(term_id, str)
+            or not term_id.strip()
+            or term_id in term_ids
+            or kind not in {
+                "intercept",
+                "main_effect",
+                "interaction",
+                "categorical_indicator",
+                "threshold_indicator",
+            }
+        ):
+            _fail(
+                "DUT_COMPILER_MODEL_TERM_INVALID",
+                "Compiler basis term IDs must be unique and kinds must be supported.",
+                details={"field": f"compiler_model_spec.basis_terms[{index}]", "term_id": term_id, "kind": kind},
+                next_action="Use a unique term_id and a supported basis kind.",
+            )
+        term_id = term_id.strip()
+        term_ids.add(term_id)
+        term: dict[str, Any] = {"term_id": term_id, "kind": kind}
+        if kind == "intercept":
+            if set(raw) != {"term_id", "kind"}:
+                _fail(
+                    "DUT_COMPILER_MODEL_TERM_INVALID",
+                    "Intercept terms cannot contain parameter fields.",
+                    details={"field": f"compiler_model_spec.basis_terms[{index}]"},
+                    next_action="Keep only term_id and kind for the intercept.",
+                )
+            intercept_count += 1
+        elif kind == "interaction":
+            parameters = raw.get("parameters")
+            if (
+                set(raw) != {"term_id", "kind", "parameters"}
+                or not isinstance(parameters, list)
+                or len(parameters) < 2
+                or len(parameters) != len(set(parameters))
+                or any(parameter not in schema for parameter in parameters)
+            ):
+                _fail(
+                    "DUT_COMPILER_MODEL_TERM_INVALID",
+                    "Interaction terms require at least two unique declared parameters.",
+                    details={"field": f"compiler_model_spec.basis_terms[{index}].parameters", "received": parameters},
+                    next_action="List the exact interacting parameter names from parameter_schema.",
+                )
+            term["parameters"] = list(parameters)
+            referenced_parameters.update(parameters)
+        else:
+            parameter = raw.get("parameter")
+            if parameter not in schema:
+                _fail(
+                    "DUT_COMPILER_MODEL_TERM_INVALID",
+                    "A compiler basis term references an undeclared parameter.",
+                    details={"field": f"compiler_model_spec.basis_terms[{index}].parameter", "received": parameter},
+                    next_action="Reference an exact parameter_schema key.",
+                )
+            term["parameter"] = parameter
+            referenced_parameters.add(parameter)
+            if kind == "main_effect":
+                expected_keys = {"term_id", "kind", "parameter"}
+            elif kind == "categorical_indicator":
+                expected_keys = {"term_id", "kind", "parameter", "value"}
+                value = raw.get("value")
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or (
+                        schema[parameter]["kind"] == "integer"
+                        and not float(value).is_integer()
+                    )
+                ):
+                    _fail(
+                        "DUT_COMPILER_MODEL_TERM_INVALID",
+                        "Categorical indicator value must be numeric and match the parameter kind.",
+                        details={"field": f"compiler_model_spec.basis_terms[{index}].value", "received": value},
+                        next_action="Use one explicit numeric category value.",
+                    )
+                term["value"] = value
+            else:
+                expected_keys = {"term_id", "kind", "parameter", "operator", "value"}
+                operator = raw.get("operator")
+                value = raw.get("value")
+                if (
+                    operator not in {"<", "<=", ">", ">="}
+                    or isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                ):
+                    _fail(
+                        "DUT_COMPILER_MODEL_TERM_INVALID",
+                        "Threshold indicators require <, <=, >, or >= and a numeric value.",
+                        details={"field": f"compiler_model_spec.basis_terms[{index}]", "operator": operator, "value": value},
+                        next_action="Declare the exact compiler regime threshold.",
+                    )
+                term.update({"operator": operator, "value": value})
+            if set(raw) != expected_keys:
+                _fail(
+                    "DUT_COMPILER_MODEL_TERM_INVALID",
+                    "A compiler basis term has missing or unexpected fields.",
+                    details={"field": f"compiler_model_spec.basis_terms[{index}]", "expected": sorted(expected_keys), "received": sorted(raw)},
+                    next_action="Match the exact basis-term schema for this kind.",
+                )
+        normalized_terms.append(term)
+    missing_parameters = sorted(set(schema).difference(referenced_parameters))
+    if intercept_count != 1 or missing_parameters:
+        _fail(
+            "DUT_COMPILER_MODEL_SPEC_INVALID",
+            "The compiler basis requires exactly one intercept and must reference every declared parameter.",
+            details={"intercept_count": intercept_count, "unreferenced_parameters": missing_parameters},
+            next_action="Add one intercept and the compiler basis terms for every parameter_schema key.",
+        )
+    return {"schema_version": 1, "basis_terms": normalized_terms}
+
+
+def _basis_value(
+    term: Mapping[str, Any],
+    *,
+    raw_parameters: Mapping[str, int | float],
+    normalized_parameters: Mapping[str, float],
+) -> float:
+    kind = term["kind"]
+    if kind == "intercept":
+        return 1.0
+    if kind == "main_effect":
+        return normalized_parameters[term["parameter"]]
+    if kind == "interaction":
+        value = 1.0
+        for parameter in term["parameters"]:
+            value *= normalized_parameters[parameter]
+        return value
+    if kind == "categorical_indicator":
+        return float(raw_parameters[term["parameter"]] == term["value"])
+    actual = raw_parameters[term["parameter"]]
+    threshold = term["value"]
+    return float(
+        actual < threshold
+        if term["operator"] == "<"
+        else actual <= threshold
+        if term["operator"] == "<="
+        else actual > threshold
+        if term["operator"] == ">"
+        else actual >= threshold
+    )
+
+
 def _build_identifiability_evidence(
-    *, schema: Mapping[str, Any], training: list[Mapping[str, Any]]
+    *,
+    schema: Mapping[str, Any],
+    training: list[Mapping[str, Any]],
+    compiler_model_spec: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[ActionableIssue]]:
     parameter_names = sorted(schema)
-    distinct_by_parameter = {
-        name: sorted({record["parameters"][name] for record in training})
+    values_by_parameter = {
+        name: [float(record["parameters"][name]) for record in training]
         for name in parameter_names
     }
-    issues: list[ActionableIssue] = []
-    for parameter_name in parameter_names:
-        distinct = distinct_by_parameter[parameter_name]
-        if len(distinct) < 2:
-            issues.append(
-                ActionableIssue(
-                    code="DUT_PARAMETER_NOT_IDENTIFIABLE",
-                    category="coverage_or_identifiability",
-                    severity="blocker",
-                    stage="corpus_onboarding",
-                    message=(
-                        f"{parameter_name} does not vary in the training examples, so its "
-                        "geometry dependencies cannot be learned."
-                    ),
-                    field_path=f"/parameter_schema/{parameter_name}",
-                    received={"distinct_training_values": distinct},
-                    expected={
-                        "minimum_distinct_training_values": 2,
-                        "unit": schema[parameter_name]["unit"],
-                    },
-                    reason="A fixed training value is indistinguishable from drawing style or an unrelated constant.",
-                    fix="Add independently varied labeled DUT examples before compiling this parameter.",
-                )
-            )
-
-    normalized_rows: list[list[float]] = []
-    column_centers = {
-        name: sum(float(record["parameters"][name]) for record in training)
-        / len(training)
-        for name in parameter_names
+    centers = {
+        name: sum(values) / len(values) for name, values in values_by_parameter.items()
     }
+    spans = {
+        name: max(values) - min(values) for name, values in values_by_parameter.items()
+    }
+    design_rows: list[list[float]] = []
     for record in training:
-        row = []
-        for name in parameter_names:
-            values = distinct_by_parameter[name]
-            span = float(values[-1]) - float(values[0])
-            row.append(
-                0.0
-                if span == 0.0
-                else (float(record["parameters"][name]) - column_centers[name]) / span
-            )
-        normalized_rows.append(row)
-    design_rank = _matrix_rank(normalized_rows)
-    if (
-        all(len(distinct_by_parameter[name]) >= 2 for name in parameter_names)
-        and design_rank < len(parameter_names)
-    ):
+        normalized_parameters = {
+            name: 0.0
+            if spans[name] == 0.0
+            else (float(record["parameters"][name]) - centers[name]) / spans[name]
+            for name in parameter_names
+        }
+        design_rows.append(
+            [
+                _basis_value(
+                    term,
+                    raw_parameters=record["parameters"],
+                    normalized_parameters=normalized_parameters,
+                )
+                for term in compiler_model_spec["basis_terms"]
+            ]
+        )
+    design_rank = _matrix_rank(design_rows)
+    required_rank = len(compiler_model_spec["basis_terms"])
+    issues: list[ActionableIssue] = []
+    if design_rank < required_rank:
         issues.append(
             ActionableIssue(
-                code="DUT_PARAMETER_EFFECTS_CONFOUNDED",
+                code="DUT_COMPILER_BASIS_NOT_IDENTIFIABLE",
                 category="coverage_or_identifiability",
                 severity="blocker",
                 stage="corpus_onboarding",
-                message="The training DOE cannot separate every declared parameter effect.",
-                field_path="/dut_records",
-                received={
-                    "normalized_design_matrix_rank": design_rank,
-                    "parameter_count": len(parameter_names),
-                },
-                expected={"minimum_design_matrix_rank": len(parameter_names)},
-                reason="Parameters that move together can explain the same geometry change, so their dependencies are not identifiable.",
-                fix="Add training DUTs that vary the coupled parameters independently.",
+                message="The training DOE does not have full rank for the compiler's declared basis.",
+                field_path="/compiler_model_spec/basis_terms",
+                received={"design_matrix_rank": design_rank, "basis_term_count": required_rank},
+                expected={"minimum_design_matrix_rank": required_rank},
+                reason="At least one declared main, interaction, categorical, or regime effect is confounded or unobserved.",
+                fix="Add DUT rows that make the declared compiler basis full-rank, or correct the compiler model declaration.",
             )
         )
 
@@ -386,45 +557,27 @@ def _build_identifiability_evidence(
             for group in groups.values()
             if len({record["parameters"][parameter_name] for record in group}) >= 2
         ]
-        satisfied = bool(witnesses)
-        witness_ids = (
-            sorted(record["dut_id"] for record in witnesses[0]) if witnesses else []
-        )
         conditional_variation[parameter_name] = {
-            "satisfied": satisfied,
-            "witness_dut_ids": witness_ids,
+            "informational_only": True,
+            "satisfied": bool(witnesses),
+            "witness_dut_ids": sorted(record["dut_id"] for record in witnesses[0]) if witnesses else [],
             "held_constant_parameters": other_names,
         }
-        if len(distinct_by_parameter[parameter_name]) >= 2 and not satisfied:
-            issues.append(
-                ActionableIssue(
-                    code="DUT_PARAMETER_CONDITIONAL_VARIATION_MISSING",
-                    category="coverage_or_identifiability",
-                    severity="blocker",
-                    stage="corpus_onboarding",
-                    message=(
-                        f"{parameter_name} never changes while the other declared parameters stay fixed."
-                    ),
-                    field_path=f"/parameter_schema/{parameter_name}",
-                    received={"held_constant_witness_dut_ids": []},
-                    expected={"minimum_conditional_variation_witnesses": 1},
-                    reason="A parameter effect cannot be separated safely without a same-context comparison.",
-                    fix=f"Add at least two DUTs where only {parameter_name} changes.",
-                )
-            )
 
-    issues = sorted(issues, key=ActionableIssue.sort_key)
     evidence = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "blocked" if issues else "sufficient",
         "blocker_count": len(issues),
         "issues": [issue.to_dict() for issue in issues],
         "training_dut_ids": sorted(record["dut_id"] for record in training),
         "parameter_names": parameter_names,
         "parameter_count": len(parameter_names),
+        "compiler_model_spec_sha256": canonical_sha256(compiler_model_spec),
+        "basis_term_ids": [term["term_id"] for term in compiler_model_spec["basis_terms"]],
         "normalized_design_matrix_rank": design_rank,
-        "minimum_required_rank": len(parameter_names),
+        "minimum_required_rank": required_rank,
         "conditional_variation": conditional_variation,
+        "decision_rule": "compiler_declared_basis_full_rank",
     }
     return evidence, issues
 
@@ -438,16 +591,17 @@ def _require_identifiability_ready(corpus: Mapping[str, Any]) -> None:
             details={"field": "identifiability_evidence"},
             next_action="Re-onboard the labeled DUT corpus with the current identifiability analysis.",
         )
-    conditional = evidence.get("conditional_variation")
-    conditional_failures = (
-        sorted(
-            name
-            for name, result in conditional.items()
-            if not isinstance(result, Mapping) or result.get("satisfied") is not True
+    model_spec = corpus.get("compiler_model_spec")
+    if (
+        not isinstance(model_spec, Mapping)
+        or evidence.get("compiler_model_spec_sha256") != canonical_sha256(model_spec)
+    ):
+        _fail(
+            "DUT_CORPUS_COMPILER_MODEL_BINDING_MISSING",
+            "Identifiability evidence is not bound to an exact compiler basis declaration.",
+            details={"field": "compiler_model_spec"},
+            next_action="Re-onboard the corpus with the exact compiler model basis.",
         )
-        if isinstance(conditional, Mapping)
-        else ["<invalid-evidence>"]
-    )
     blocker_count = evidence.get("blocker_count")
     rank = evidence.get("normalized_design_matrix_rank")
     required_rank = evidence.get("minimum_required_rank")
@@ -459,7 +613,6 @@ def _require_identifiability_ready(corpus: Mapping[str, Any]) -> None:
         or isinstance(required_rank, bool)
         or not isinstance(required_rank, int)
         or rank < required_rank
-        or conditional_failures
     ):
         issues = evidence.get("issues")
         _fail(
@@ -477,9 +630,8 @@ def _require_identifiability_ready(corpus: Mapping[str, Any]) -> None:
                 else [],
                 "normalized_design_matrix_rank": rank,
                 "minimum_required_rank": required_rank,
-                "conditional_variation_failures": conditional_failures,
             },
-            next_action="Add independently and conditionally varied DUT examples, then onboard a new corpus version.",
+            next_action="Add DUT examples that make the declared compiler basis full-rank, then onboard a new corpus version.",
         )
 
 
@@ -490,6 +642,7 @@ def onboard_dut_corpus(
     device_family: str,
     topology: str,
     parameter_schema: Mapping[str, Any],
+    compiler_model_spec: Mapping[str, Any],
     dut_records: list[Mapping[str, Any]],
     layer_roles: Mapping[str, Any],
     validation_dut_ids: list[str],
@@ -507,6 +660,9 @@ def onboard_dut_corpus(
         dut_records=dut_records,
         layer_roles=layer_roles,
         validation_dut_ids=validation_dut_ids,
+    )
+    normalized_model_spec = _validate_compiler_model_spec(
+        compiler_model_spec, schema=schema
     )
     if not isinstance(technology_identity, Mapping) or not technology_identity:
         _fail(
@@ -582,7 +738,11 @@ def onboard_dut_corpus(
                 )
         training = [record for record in enriched if record["dut_id"] not in set(validation_dut_ids)]
         identifiability_evidence, identifiability_issues = (
-            _build_identifiability_evidence(schema=schema, training=training)
+            _build_identifiability_evidence(
+                schema=schema,
+                training=training,
+                compiler_model_spec=normalized_model_spec,
+            )
         )
         all_metric_names = sorted(set.intersection(*(set(record["flat_metrics"]) for record in training)))
         invariants = []
@@ -601,7 +761,7 @@ def onboard_dut_corpus(
             "generalization_claim_allowed": False,
         }
         corpus = {
-            "schema_version": 2,
+            "schema_version": 3,
             "artifact_type": "DutCorpusArtifact",
             "technology_identity": immutable_json_copy(technology_identity),
             "device_family": device_family,
@@ -610,6 +770,7 @@ def onboard_dut_corpus(
             "source_size_bytes": snapshot.size_bytes,
             "dbu_um": analysis["dbu_um"],
             "parameter_schema": schema,
+            "compiler_model_spec": normalized_model_spec,
             "layer_roles": roles,
             "dut_records": enriched,
             "coverage_matrix": _coverage(schema, enriched),
@@ -690,12 +851,12 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             details={"field": "package_path", "error_type": type(exc).__name__},
             next_action="Restore the exact content-addressed corpus package.",
         )
-    if not isinstance(corpus, dict) or corpus.get("schema_version") not in {1, 2} or corpus.get("artifact_type") != "DutCorpusArtifact":
+    if not isinstance(corpus, dict) or corpus.get("schema_version") not in {1, 2, 3} or corpus.get("artifact_type") != "DutCorpusArtifact":
         _fail(
             "DUT_CORPUS_PACKAGE_SCHEMA_INVALID",
             "Corpus metadata does not match the supported DutCorpusArtifact schema.",
             details={"field": "corpus.json", "schema_version": corpus.get("schema_version") if isinstance(corpus, dict) else None, "artifact_type": corpus.get("artifact_type") if isinstance(corpus, dict) else None},
-            next_action="Restore a supported schema_version 1 or 2 DutCorpusArtifact package.",
+            next_action="Restore a supported schema_version 1, 2, or 3 DutCorpusArtifact package.",
         )
     required_mappings = (
         "technology_identity",
@@ -737,7 +898,7 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             details={"field": "technology_identity", "invalid_fields": invalid_technology_fields},
             next_action="Restore exact technology and PDK revision identity.",
         )
-    if corpus.get("schema_version") == 2:
+    if corpus.get("schema_version") in {2, 3}:
         evidence = corpus.get("identifiability_evidence")
         issues = evidence.get("issues") if isinstance(evidence, Mapping) else None
         conditional = (
@@ -750,7 +911,8 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
         )
         if (
             not isinstance(evidence, Mapping)
-            or evidence.get("schema_version") != 1
+            or evidence.get("schema_version")
+            != (2 if corpus.get("schema_version") == 3 else 1)
             or evidence.get("status") not in {"sufficient", "blocked"}
             or isinstance(blocker_count, bool)
             or not isinstance(blocker_count, int)
@@ -777,6 +939,17 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
                 "Persisted identifiability evidence is incomplete or internally inconsistent.",
                 details={"field": "identifiability_evidence"},
                 next_action="Restore or re-onboard the exact labeled DUT corpus.",
+            )
+    if corpus.get("schema_version") == 3:
+        normalized_model_spec = _validate_compiler_model_spec(
+            corpus.get("compiler_model_spec"), schema=corpus["parameter_schema"]
+        )
+        if normalized_model_spec != corpus.get("compiler_model_spec"):
+            _fail(
+                "DUT_CORPUS_COMPILER_MODEL_BINDING_INVALID",
+                "Persisted compiler model basis is not canonical.",
+                details={"field": "compiler_model_spec"},
+                next_action="Restore or re-onboard the exact schema_version 3 corpus.",
             )
     dut_ids: list[str] = []
     for index, record in enumerate(corpus["dut_records"]):
@@ -825,12 +998,21 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             next_action="Restore the exact corpus partition manifest.",
         )
     evidence = corpus.get("identifiability_evidence")
-    if corpus.get("schema_version") == 2 and (
+    if corpus.get("schema_version") in {2, 3} and (
         evidence.get("training_dut_ids") != sorted(train_ids)
         or evidence.get("parameter_names") != sorted(corpus["parameter_schema"])
         or evidence.get("parameter_count") != len(corpus["parameter_schema"])
         or set(evidence.get("conditional_variation", {}))
         != set(corpus["parameter_schema"])
+        or (
+            corpus.get("schema_version") == 3
+            and (
+                evidence.get("compiler_model_spec_sha256")
+                != canonical_sha256(corpus["compiler_model_spec"])
+                or evidence.get("basis_term_ids")
+                != [term["term_id"] for term in corpus["compiler_model_spec"]["basis_terms"]]
+            )
+        )
     ):
         _fail(
             "DUT_CORPUS_IDENTIFIABILITY_EVIDENCE_INVALID",
@@ -957,10 +1139,43 @@ def _validate_scorecard_evidence(
     corpus_sha256: str,
     scorecard: Mapping[str, Any],
     compiler_code_sha256: str,
+    qualification_policy_authority: QualificationPolicyAuthority | None,
 ) -> None:
     partition_sha256 = canonical_sha256(corpus["partition"])
     policy = scorecard.get("scoring_policy")
     compiler_identity = scorecard.get("compiler_identity")
+    qualification_policy = scorecard.get("qualification_policy")
+    approval_receipt = scorecard.get("qualification_policy_approval_receipt")
+    if (
+        scorecard.get("policy_class") != "host_approved_candidate_qualification"
+        or scorecard.get("candidate_qualification_eligible") is not True
+        or not isinstance(qualification_policy, Mapping)
+        or scorecard.get("qualification_policy_sha256")
+        != canonical_sha256(qualification_policy)
+        or not isinstance(approval_receipt, Mapping)
+    ):
+        _fail(
+            "ADAPTER_CANDIDATE_QUALIFICATION_POLICY_REQUIRED",
+            "Caller-selected diagnostic scoring cannot qualify an adapter candidate.",
+            details={"policy_class": scorecard.get("policy_class")},
+            next_action="Rescore through a configured host qualification-policy authority.",
+        )
+    qualification_scoring_policy = {
+        name: qualification_policy.get(name)
+        for name in (
+            "absolute_tolerance",
+            "relative_tolerance",
+            "minimum_aggregate_score",
+            "exact_fingerprint_required",
+        )
+    }
+    if policy != qualification_scoring_policy:
+        _fail(
+            "ADAPTER_CANDIDATE_QUALIFICATION_POLICY_BINDING_INVALID",
+            "The scorecard scoring fields do not match the approved qualification policy.",
+            details={"expected": qualification_scoring_policy, "received": policy},
+            next_action="Regenerate the scorecard with the exact host-approved policy.",
+        )
     if (
         scorecard.get("corpus_sha256") != corpus_sha256
         or scorecard.get("partition_sha256") != partition_sha256
@@ -969,6 +1184,8 @@ def _validate_scorecard_evidence(
         or not isinstance(compiler_identity, Mapping)
         or scorecard.get("compiler_identity_sha256") != canonical_sha256(compiler_identity)
         or compiler_identity.get("compiler_code_sha256") != compiler_code_sha256
+        or compiler_identity.get("compiler_model_spec_sha256")
+        != canonical_sha256(corpus["compiler_model_spec"])
         or scorecard.get("reference_dbu_um") != corpus.get("dbu_um")
         or scorecard.get("candidate_dbu_um") != corpus.get("dbu_um")
         or scorecard.get("dbu_exact_match") is not True
@@ -979,6 +1196,21 @@ def _validate_scorecard_evidence(
             details={"expected_corpus_sha256": corpus_sha256, "expected_partition_sha256": partition_sha256, "compiler_code_sha256": compiler_code_sha256},
             next_action="Rescore the exact compiler output and use its untouched package.",
         )
+    available_metrics = tuple(
+        sorted(
+            set.intersection(
+                *(set(record["flat_metrics"]) for record in corpus["dut_records"])
+            )
+        )
+    )
+    verify_qualification_policy(
+        authority=qualification_policy_authority,
+        policy_document=qualification_policy,
+        approval_receipt=approval_receipt,
+        corpus_sha256=corpus_sha256,
+        compiler_identity=compiler_identity,
+        available_metrics=available_metrics,
+    )
     if (
         scorecard.get("reference_source_replayed") is not False
         or scorecard.get("evidence_class") != "distinct_stream_logical_validation_no_execution_receipt"
@@ -1003,9 +1235,28 @@ def _validate_scorecard_evidence(
         )
     seen: set[str] = set()
     exact_required = policy.get("exact_fingerprint_required") is True
+    required_metrics = set(qualification_policy["required_metrics"])
     for item in per_dut:
         dut_id = item.get("dut_id") if isinstance(item, Mapping) else None
         expected_cohort = "logical_validation" if dut_id in expected_validation else "train_reference"
+        metric_results = item.get("metrics") if isinstance(item, Mapping) else None
+        metrics_by_name = (
+            {
+                metric.get("metric"): metric
+                for metric in metric_results
+                if isinstance(metric, Mapping)
+            }
+            if isinstance(metric_results, list)
+            else {}
+        )
+        required_metrics_failed = sorted(
+            metric
+            for metric in required_metrics
+            if metric not in metrics_by_name
+            or metrics_by_name[metric].get("status") != "passed"
+            or metrics_by_name[metric].get("hard_fail") is not False
+            or metrics_by_name[metric].get("required_for_qualification") is not True
+        )
         if (
             dut_id not in expected_ids
             or dut_id in seen
@@ -1015,13 +1266,14 @@ def _validate_scorecard_evidence(
             or item.get("hard_fail_reasons")
             or item.get("exact_fingerprint_required") is not exact_required
             or (exact_required and item.get("exact_geometry_match") is not True)
+            or required_metrics_failed
             or not SHA256_PATTERN.fullmatch(str(item.get("reference_geometry_fingerprint_sha256", "")))
             or not SHA256_PATTERN.fullmatch(str(item.get("candidate_geometry_fingerprint_sha256", "")))
         ):
             _fail(
                 "ADAPTER_CANDIDATE_SCORECARD_STRUCTURE_INVALID",
                 "A per-DUT score result is missing, duplicated, failed, or bound to the wrong cohort.",
-                details={"dut_id": dut_id, "expected_cohort": expected_cohort},
+                details={"dut_id": dut_id, "expected_cohort": expected_cohort, "required_metrics_failed": required_metrics_failed},
                 next_action="Regenerate the scorecard using the exact corpus and compiler output.",
             )
         seen.add(dut_id)
@@ -1135,6 +1387,7 @@ def score_reproduced_corpus(
     scoring_policy: Mapping[str, Any],
     scorecard_root: str | Path,
     compiler_identity: Mapping[str, Any],
+    qualification_policy_authority: QualificationPolicyAuthority | None = None,
     klayout_executable: str | None = None,
     timeout_seconds: float = 60.0,
     worker_runner=run_klayout_worker,
@@ -1151,14 +1404,23 @@ def score_reproduced_corpus(
         or not compiler_identity.get("compiler_version", "").strip()
         or not isinstance(compiler_identity.get("compiler_code_sha256"), str)
         or not SHA256_PATTERN.fullmatch(compiler_identity.get("compiler_code_sha256", ""))
+        or compiler_identity.get("compiler_model_spec_sha256")
+        != canonical_sha256(corpus["compiler_model_spec"])
     ):
         _fail(
             "CORPUS_SCORING_COMPILER_IDENTITY_INVALID",
-            "Scoring requires compiler_id, compiler_version, and an exact lowercase code SHA-256.",
+            "Scoring requires exact compiler id/version/code hash and the corpus model-spec hash.",
             details={"field": "compiler_identity", "received": dict(compiler_identity) if isinstance(compiler_identity, Mapping) else compiler_identity},
             next_action="Identify the exact compiler implementation before scoring its output.",
         )
     required_policy = {"absolute_tolerance", "relative_tolerance", "minimum_aggregate_score", "exact_fingerprint_required"}
+    if not isinstance(scoring_policy, Mapping):
+        _fail(
+            "CORPUS_SCORING_POLICY_INVALID",
+            "Scoring policy must be an object with explicit tolerances and gates.",
+            details={"field": "scoring_policy", "received_type": type(scoring_policy).__name__},
+            next_action="Provide absolute_tolerance, relative_tolerance, minimum_aggregate_score, and exact_fingerprint_required.",
+        )
     missing_policy = sorted(required_policy.difference(scoring_policy))
     if missing_policy:
         _fail(
@@ -1177,6 +1439,26 @@ def score_reproduced_corpus(
             },
             next_action="Set exact_fingerprint_required to true or false explicitly.",
         )
+    invalid_numeric_fields = sorted(
+        name
+        for name in (
+            "absolute_tolerance",
+            "relative_tolerance",
+            "minimum_aggregate_score",
+        )
+        if isinstance(scoring_policy[name], bool)
+        or not isinstance(scoring_policy[name], (int, float))
+    )
+    if invalid_numeric_fields:
+        _fail(
+            "CORPUS_SCORING_POLICY_INVALID",
+            "Scoring tolerances and threshold must be finite numbers.",
+            details={
+                "field": "scoring_policy",
+                "invalid_numeric_fields": invalid_numeric_fields,
+            },
+            next_action="Replace the listed fields with numeric values; use a separate boolean only for exact_fingerprint_required.",
+        )
     absolute_tolerance = float(scoring_policy["absolute_tolerance"])
     relative_tolerance = float(scoring_policy["relative_tolerance"])
     threshold = float(scoring_policy["minimum_aggregate_score"])
@@ -1188,6 +1470,43 @@ def score_reproduced_corpus(
             next_action="Correct the explicit numeric scoring thresholds.",
         )
     reference_by_id = {record["dut_id"]: record for record in corpus["dut_records"]}
+    available_metrics = tuple(
+        sorted(
+            set.intersection(
+                *(set(record["flat_metrics"]) for record in corpus["dut_records"])
+            )
+        )
+    )
+    qualification_policy = None
+    qualification_receipt = None
+    effective_policy = immutable_json_copy(scoring_policy)
+    policy_class = "caller_diagnostic_not_candidate_qualification"
+    if qualification_policy_authority is not None:
+        qualification_policy, qualification_receipt = issue_qualification_policy(
+            authority=qualification_policy_authority,
+            corpus_sha256=corpus_sha256,
+            compiler_identity=compiler_identity,
+            available_metrics=available_metrics,
+        )
+        effective_policy = {
+            name: qualification_policy[name]
+            for name in (
+                "absolute_tolerance",
+                "relative_tolerance",
+                "minimum_aggregate_score",
+                "exact_fingerprint_required",
+            )
+        }
+        policy_class = "host_approved_candidate_qualification"
+    absolute_tolerance = float(effective_policy["absolute_tolerance"])
+    relative_tolerance = float(effective_policy["relative_tolerance"])
+    threshold = float(effective_policy["minimum_aggregate_score"])
+    exact_required = bool(effective_policy["exact_fingerprint_required"])
+    required_metrics = set(
+        qualification_policy.get("required_metrics", [])
+        if qualification_policy is not None
+        else []
+    )
     missing_cells = sorted(set(reference_by_id).difference(reproduced_cell_by_dut_id))
     unexpected_cells = sorted(set(reproduced_cell_by_dut_id).difference(reference_by_id))
     if missing_cells or unexpected_cells:
@@ -1262,6 +1581,7 @@ def score_reproduced_corpus(
                     absolute_tolerance,
                     relative_tolerance,
                 )
+                required_metric_failed = metric in required_metrics and not passed
                 metrics.append({
                     "metric": metric,
                     "reference": reference_metrics[metric],
@@ -1269,17 +1589,21 @@ def score_reproduced_corpus(
                     "absolute_delta": delta,
                     "score": score,
                     "status": "passed" if passed else "failed",
-                    "hard_fail": False,
+                    "required_for_qualification": metric in required_metrics,
+                    "hard_fail": required_metric_failed,
                 })
             fingerprint_match = reference["geometry_fingerprint_sha256"] == candidate["geometry_fingerprint_sha256"]
             metric_score = sum(item["score"] for item in metrics) / len(metrics) if metrics else 0.0
-            exact_required = bool(scoring_policy["exact_fingerprint_required"])
             dut_score = metric_score if not exact_required or fingerprint_match else 0.0
             hard_fail_reasons = []
             if exact_required and not fingerprint_match:
                 hard_fail_reasons.append("EXACT_GEOMETRY_FINGERPRINT_MISMATCH")
             if any(item["hard_fail"] for item in metrics):
-                hard_fail_reasons.append("REQUIRED_GEOMETRY_METRIC_MISSING")
+                hard_fail_reasons.extend(
+                    f"REQUIRED_METRIC_FAILED:{item['metric']}"
+                    for item in metrics
+                    if item["hard_fail"]
+                )
             per_dut.append({
                 "dut_id": dut_id,
                 "cohort": "logical_validation" if dut_id in holdout else "train_reference",
@@ -1306,8 +1630,19 @@ def score_reproduced_corpus(
         "artifact_type": "AdapterConformanceScorecard",
         "corpus_sha256": corpus_sha256,
         "partition_sha256": canonical_sha256(corpus["partition"]),
-        "scoring_policy": immutable_json_copy(scoring_policy),
-        "scoring_policy_sha256": canonical_sha256(scoring_policy),
+        "requested_diagnostic_policy": immutable_json_copy(scoring_policy),
+        "requested_diagnostic_policy_sha256": canonical_sha256(scoring_policy),
+        "scoring_policy": immutable_json_copy(effective_policy),
+        "scoring_policy_sha256": canonical_sha256(effective_policy),
+        "policy_class": policy_class,
+        "qualification_policy": qualification_policy,
+        "qualification_policy_sha256": (
+            canonical_sha256(qualification_policy)
+            if qualification_policy is not None
+            else None
+        ),
+        "qualification_policy_approval_receipt": qualification_receipt,
+        "candidate_qualification_eligible": qualification_policy is not None,
         "compiler_identity": immutable_json_copy(compiler_identity),
         "compiler_identity_sha256": canonical_sha256(compiler_identity),
         "reference_dbu_um": corpus["dbu_um"],
@@ -1352,6 +1687,7 @@ def build_technology_adapter_candidate(
     adapter_identity: Mapping[str, Any],
     compiler_code_sha256: str,
     adapter_root: str | Path,
+    qualification_policy_authority: QualificationPolicyAuthority | None = None,
 ) -> dict[str, Any]:
     """Package a scored candidate without claiming foundry qualification."""
 
@@ -1367,6 +1703,13 @@ def build_technology_adapter_candidate(
         document_name="scorecard.json",
         artifact_type="AdapterConformanceScorecard",
     )
+    if scorecard.get("policy_class") != "host_approved_candidate_qualification":
+        _fail(
+            "ADAPTER_CANDIDATE_QUALIFICATION_POLICY_REQUIRED",
+            "A diagnostic scorecard cannot be used to build an adapter candidate.",
+            details={"policy_class": scorecard.get("policy_class")},
+            next_action="Rescore through the host-approved qualification policy authority.",
+        )
     _validate_resolution_evidence(
         corpus=corpus,
         corpus_sha256=corpus_sha256,
@@ -1404,6 +1747,7 @@ def build_technology_adapter_candidate(
         corpus_sha256=corpus_sha256,
         scorecard=scorecard,
         compiler_code_sha256=compiler_code_sha256,
+        qualification_policy_authority=qualification_policy_authority,
     )
     if not isinstance(adapter_identity, Mapping) or set(adapter_identity) != ADAPTER_IDENTITY_FIELDS:
         _fail(
@@ -1446,6 +1790,21 @@ def build_technology_adapter_candidate(
         "resolution_manifest_sha256": canonical_sha256(resolution),
         "scorecard_sha256": canonical_sha256(scorecard),
         "compiler_code_sha256": compiler_code_sha256,
+        "compiler_model_spec_sha256": canonical_sha256(corpus["compiler_model_spec"]),
+        "qualification_policy_sha256": scorecard["qualification_policy_sha256"],
+        "qualification_policy_authority_id": scorecard["qualification_policy"][
+            "authority_id"
+        ],
+        "qualification_policy_id": scorecard["qualification_policy"]["policy_id"],
+        "qualification_policy_version": scorecard["qualification_policy"][
+            "policy_version"
+        ],
+        "qualification_policy_approved_by": scorecard[
+            "qualification_policy_approval_receipt"
+        ]["approved_by"],
+        "qualification_policy_approval_receipt_sha256": scorecard[
+            "qualification_policy_approval_receipt"
+        ]["approval_receipt_sha256"],
         "parameter_schema": corpus["parameter_schema"],
         "coverage_matrix": corpus["coverage_matrix"],
         "technology_identity": corpus["technology_identity"],
