@@ -36,7 +36,7 @@ LLM orchestration 지침도 저장소에 함께 둔다. 범용 GDS/PCell 작업�
 | Reference style 추출 | 가능 | hierarchy/layer/직교성/치수 빈도 관측; rule·net·전기 특성 추론 없음 |
 | Direct-measurement Phase 1 | 제한된 nonproduction scaffold | Transistor adapter 없음, Pad 재합성; bounded polyline은 multi-rail mesh로 compile |
 | Pad macro onboarding | 지원 | Source cell을 immutable artifact로 등록하고 새 top에서 instance overlay; Phase 1과는 아직 미연결 |
-| Transistor corpus onboarding | 지원 | Compiler가 선언한 main/interaction/discrete-regime basis의 DOE rank를 검사하고 blocker를 corpus에 결속; caller score는 진단 전용이며 host 승인 policy의 필수 metric만 candidate gate에 사용; 실행 receipt·sealed 평가·신규 공정 PCell·foundry 승인은 아님 |
+| Transistor corpus onboarding | 지원 | Compiler가 선언한 main/interaction/discrete-regime basis의 DOE rank와 수치 안정성을 검사하고 blocker를 corpus에 결속; caller score는 진단 전용이며 host 승인 policy가 metric별 단위·허용오차·가중치·hard-fail을 지정; 실행 receipt·sealed 평가·신규 공정 PCell·foundry 승인은 아님 |
 | Persistent `teg_intake` | 제한 지원 | Stock은 bundled research-only Kelvin resistor profile/version에 한정; 임의 target은 host provider 필요 |
 | Persistent plan/generate/verify | Host 통합 필요 | Target-production verifier/provider/engine과 external runner/policy 필요 |
 | Foundry sign-off·PCM release | 불가 | 실제 PDK/deck/probe/scribe/조직 정책 필요 |
