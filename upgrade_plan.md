@@ -416,7 +416,8 @@ example layout + DUT parameter manifest
 6. Candidate fitting 전에 train/reference-candidate와 holdout DUT ID를 `CorpusPartitionManifest`로
    확정·hash한다. Holdout geometry/labels은 recipe/style extraction과 reference selection에서 읽을 수 없는
    sealed input으로 두고, split 이후의 교체나 leakage는 새 corpus/version으로만 처리한다.
-7. 선언된 main/interaction/categorical/regime basis가 full rank가 아니면 추론하지 않는다.
+7. 선언된 main/interaction/categorical/regime basis가 full rank가 아니거나 column-normalized design
+   matrix의 minimum singular value/condition number가 안정성 gate를 넘지 못하면 추론하지 않는다.
    `DUT_COMPILER_BASIS_NOT_IDENTIFIABLE`에 실제 rank, 필요한 basis term 수와 추가 DUT가 필요한 이유를
    반환한다. L과 CPP의 개별 축만으로 `L×CPP`를 식별했다고 주장하지 않으며, full-rank 일반 DOE를
    one-factor-at-a-time 쌍이 없다는 이유만으로 차단하지 않는다. 동일 parameter row가 서로 다른
@@ -475,7 +476,8 @@ example layout + DUT parameter manifest
    `CorpusResolutionManifest`로 저장하고 source corpus/parameter manifest hash에 결속한다. Corpus가
    바뀌거나 답변이 일부 variation만 해결하면 기존 승인을 재사용하지 않고
    `DRAWING_STYLE_POLICY_STALE`/`DRAWING_STYLE_VARIATION_POLICY_REQUIRED`로 다시 질문한다.
-6. Reference/style/holdout 비교 dimension, tolerance, threshold, hard-fail, missing-evidence와 aggregation
+6. Reference/style/holdout 비교 dimension마다 metric kind/unit, absolute/relative tolerance, weight,
+   threshold, hard-fail, missing-evidence와 aggregation
    규칙을 `ConformanceScoringPolicy`로 작성해 holdout을 열기 전에 승인·hash한다. Holdout 결과를 본 뒤
    threshold를 바꾸면 기존 score를 덮어쓰지 않고 새 policy/package candidate로 다시 평가한다.
 
@@ -538,7 +540,8 @@ example layout + DUT parameter manifest
    실패 시 code와 함께 failing DUT/layer/group, measured/threshold, diff handle, 원인과 다음 correction을
    공통 `ValidationReport`로 보여준다.
 7. MCP 호출자가 전달한 scoring policy는 diagnostic score에만 사용한다. Candidate qualification은
-   allowlisted host `qualification_policy_authority`가 발행한 policy ID/version/hash, required metric,
+   allowlisted host `qualification_policy_authority`가 발행한 policy ID/version/hash, 모든 metric의
+   kind/tolerance/weight/hard-fail rule,
    승인자와 exact corpus/compiler receipt만 사용한다. Required metric 실패는 평균/threshold로 상쇄하지
    않고, candidate build 시 authority가 revocation을 포함해 receipt를 다시 검증한다.
 8. Package lifecycle은 `candidate → reviewed → geometry_validated → foundry_validated → deprecated/revoked`로
@@ -558,8 +561,9 @@ Upgrade checkpoint 진행:
 - [x] 여러 labeled DUT cell과 parameter row, semantic layer/terminal mapping, logical validation partition을
   받는 corpus artifact와 coverage/identifiability gate를 구현했다. 같은 source에 geometry가 보이므로
   sealed holdout이라고 주장하지 않는다.
-- [x] Identifiability blocker를 corpus schema v3에 영구 결속하고 compiler-declared
-  main/interaction/category/threshold-regime basis의 normalized design-matrix rank를 검사한다.
+- [x] Identifiability blocker를 corpus schema v4/evidence schema v3에 영구 결속하고 compiler-declared
+  main/interaction/category/threshold-regime basis의 normalized design-matrix rank, minimum singular value와
+  condition number를 검사한다. 거의 공선인 full-rank DOE도 차단하며 parameter-space margin은 설명용이다.
   Conditional-variation witness는 설명용이며 hard gate가 아니다. Blocker가 하나라도 있거나 exact
   model-spec hash evidence가 없으면 score/candidate 단계가 fail-closed한다.
 - [x] Observed invariant style metric과 same-parameter/different-geometry ambiguity를 검출하고, 사용자가
@@ -576,8 +580,9 @@ Upgrade checkpoint 진행:
 - [x] `exact_fingerprint_required`는 aggregate threshold와 무관한 per-DUT hard gate이며, reproduced
   stream과 corpus의 DBU exact equality를 scoring 전 hard gate로 검사한다.
 - [x] Caller-selected score policy는 diagnostic-only로 분리했다. Candidate용 score는 host가 주입한
-  trusted qualification-policy authority, 승인자/receipt와 required metric hard fail을 요구하고,
-  candidate build 시 exact policy/corpus/compiler binding과 current non-revoked receipt를 재검증한다.
+  trusted qualification-policy authority, 승인자/receipt와 metric별 kind/tolerance/weight/hard-fail을
+  요구한다. Candidate build 시 exact policy/corpus/compiler binding, current non-revoked receipt와
+  per-DUT weighted metric 판정을 재검증한다.
 - [ ] Corpus로부터 CPP 연계 Poly/Active/contact/implant/terminal dependency recipe를 자동 합성하는
   process-specific compiler는 만들지 않았다. 실제 labeled corpus, topology 규칙과 foundry 검증 없이는
   한 GDS에서 이를 추론하지 않으며 candidate score를 PCell/electrical/foundry 동등성으로 승격하지 않는다.

@@ -22,6 +22,7 @@ from .klayout_adapter import create_layout_snapshot, run_klayout_worker
 from .qualification_policy import (
     QualificationPolicyAuthority,
     issue_qualification_policy,
+    qualification_metric_kind,
     verify_qualification_policy,
 )
 from .validation_report import ActionableIssue, ClarificationQuestion, ValidationReport
@@ -29,6 +30,8 @@ from .workflow_manifest import canonical_json_bytes, canonical_sha256, immutable
 
 
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+MAX_NORMALIZED_DESIGN_CONDITION_NUMBER = 10_000.0
+MIN_NORMALIZED_DESIGN_SINGULAR_VALUE = 1e-4
 ADAPTER_IDENTITY_FIELDS = frozenset(
     {
         "technology",
@@ -306,6 +309,136 @@ def _matrix_rank(rows: list[list[float]], *, tolerance: float = 1e-12) -> int:
     return rank
 
 
+def _symmetric_eigenvalues(matrix: list[list[float]]) -> list[float]:
+    """Return eigenvalues of a small symmetric matrix using Jacobi rotations."""
+
+    size = len(matrix)
+    if size == 0:
+        return []
+    if size == 1:
+        return [float(matrix[0][0])]
+    values = [row[:] for row in matrix]
+    for _ in range(max(32, 50 * size * size)):
+        pivot_row, pivot_column = max(
+            (
+                (row, column)
+                for row in range(size)
+                for column in range(row + 1, size)
+            ),
+            key=lambda pair: abs(values[pair[0]][pair[1]]),
+            default=(0, 0),
+        )
+        off_diagonal = values[pivot_row][pivot_column]
+        if abs(off_diagonal) <= 1e-15:
+            break
+        diagonal_delta = (
+            values[pivot_column][pivot_column] - values[pivot_row][pivot_row]
+        )
+        if diagonal_delta == 0:
+            tangent = 1.0
+        else:
+            ratio = diagonal_delta / (2.0 * off_diagonal)
+            tangent = math.copysign(
+                1.0 / (abs(ratio) + math.sqrt(1.0 + ratio * ratio)), ratio
+            )
+        cosine = 1.0 / math.sqrt(1.0 + tangent * tangent)
+        sine = tangent * cosine
+        row_diagonal = values[pivot_row][pivot_row]
+        column_diagonal = values[pivot_column][pivot_column]
+        values[pivot_row][pivot_row] = (
+            cosine * cosine * row_diagonal
+            - 2.0 * sine * cosine * off_diagonal
+            + sine * sine * column_diagonal
+        )
+        values[pivot_column][pivot_column] = (
+            sine * sine * row_diagonal
+            + 2.0 * sine * cosine * off_diagonal
+            + cosine * cosine * column_diagonal
+        )
+        values[pivot_row][pivot_column] = 0.0
+        values[pivot_column][pivot_row] = 0.0
+        for index in range(size):
+            if index in {pivot_row, pivot_column}:
+                continue
+            row_value = values[index][pivot_row]
+            column_value = values[index][pivot_column]
+            values[index][pivot_row] = cosine * row_value - sine * column_value
+            values[pivot_row][index] = values[index][pivot_row]
+            values[index][pivot_column] = sine * row_value + cosine * column_value
+            values[pivot_column][index] = values[index][pivot_column]
+    return sorted(values[index][index] for index in range(size))
+
+
+def _normalized_design_stability(rows: list[list[float]]) -> dict[str, Any]:
+    """Measure basis collinearity after removing arbitrary column magnitude."""
+
+    if not rows or not rows[0]:
+        return {
+            "normalized_singular_values": [],
+            "minimum_normalized_singular_value": None,
+            "maximum_normalized_singular_value": None,
+            "normalized_design_condition_number": None,
+        }
+    column_count = len(rows[0])
+    columns = [
+        [float(row[column]) for row in rows] for column in range(column_count)
+    ]
+    norms = [math.sqrt(sum(value * value for value in column)) for column in columns]
+    if any(norm == 0 for norm in norms):
+        singular_values = [0.0] * column_count
+    else:
+        normalized_columns = [
+            [value / norm for value in column]
+            for column, norm in zip(columns, norms)
+        ]
+        gram = [
+            [
+                sum(left * right for left, right in zip(left_column, right_column))
+                for right_column in normalized_columns
+            ]
+            for left_column in normalized_columns
+        ]
+        singular_values = sorted(
+            math.sqrt(max(0.0, eigenvalue))
+            for eigenvalue in _symmetric_eigenvalues(gram)
+        )
+    minimum = singular_values[0]
+    maximum = singular_values[-1]
+    condition_number = None if minimum <= 0 else maximum / minimum
+    return {
+        "normalized_singular_values": singular_values,
+        "minimum_normalized_singular_value": minimum,
+        "maximum_normalized_singular_value": maximum,
+        "normalized_design_condition_number": condition_number,
+    }
+
+
+def _normalized_parameter_space_margin(
+    *,
+    training: list[Mapping[str, Any]],
+    parameter_names: list[str],
+    centers: Mapping[str, float],
+    spans: Mapping[str, float],
+) -> float:
+    points = {
+        tuple(
+            0.0
+            if spans[name] == 0.0
+            else (float(record["parameters"][name]) - centers[name]) / spans[name]
+            for name in parameter_names
+        )
+        for record in training
+    }
+    if len(points) < 2:
+        return 0.0
+    ordered = sorted(points)
+    return min(
+        math.sqrt(sum((left - right) ** 2 for left, right in zip(first, second)))
+        for index, first in enumerate(ordered)
+        for second in ordered[index + 1 :]
+    )
+
+
 def _validate_compiler_model_spec(
     model_spec: Mapping[str, Any], *, schema: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -528,6 +661,15 @@ def _build_identifiability_evidence(
         )
     design_rank = _matrix_rank(design_rows)
     required_rank = len(compiler_model_spec["basis_terms"])
+    stability = _normalized_design_stability(design_rows)
+    minimum_singular_value = stability["minimum_normalized_singular_value"]
+    condition_number = stability["normalized_design_condition_number"]
+    parameter_space_margin = _normalized_parameter_space_margin(
+        training=training,
+        parameter_names=parameter_names,
+        centers=centers,
+        spans=spans,
+    )
     issues: list[ActionableIssue] = []
     if design_rank < required_rank:
         issues.append(
@@ -542,6 +684,33 @@ def _build_identifiability_evidence(
                 expected={"minimum_design_matrix_rank": required_rank},
                 reason="At least one declared main, interaction, categorical, or regime effect is confounded or unobserved.",
                 fix="Add DUT rows that make the declared compiler basis full-rank, or correct the compiler model declaration.",
+            )
+        )
+    elif (
+        minimum_singular_value is None
+        or minimum_singular_value < MIN_NORMALIZED_DESIGN_SINGULAR_VALUE
+        or condition_number is None
+        or condition_number > MAX_NORMALIZED_DESIGN_CONDITION_NUMBER
+    ):
+        issues.append(
+            ActionableIssue(
+                code="DUT_COMPILER_BASIS_NUMERICALLY_UNSTABLE",
+                category="coverage_or_identifiability",
+                severity="blocker",
+                stage="corpus_onboarding",
+                message="The training DOE is full-rank but too close to collinear for stable compiler fitting.",
+                field_path="/compiler_model_spec/basis_terms",
+                received={
+                    "minimum_normalized_singular_value": minimum_singular_value,
+                    "normalized_design_condition_number": condition_number,
+                    "normalized_parameter_space_margin": parameter_space_margin,
+                },
+                expected={
+                    "minimum_normalized_singular_value": MIN_NORMALIZED_DESIGN_SINGULAR_VALUE,
+                    "maximum_normalized_design_condition_number": MAX_NORMALIZED_DESIGN_CONDITION_NUMBER,
+                },
+                reason="Small input changes could produce large fitted-coefficient changes even though the matrix rank is technically full.",
+                fix="Add DUT points that separate the coupled parameters and declared interaction/regime terms more widely.",
             )
         )
 
@@ -565,7 +734,7 @@ def _build_identifiability_evidence(
         }
 
     evidence = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "blocked" if issues else "sufficient",
         "blocker_count": len(issues),
         "issues": [issue.to_dict() for issue in issues],
@@ -576,20 +745,37 @@ def _build_identifiability_evidence(
         "basis_term_ids": [term["term_id"] for term in compiler_model_spec["basis_terms"]],
         "normalized_design_matrix_rank": design_rank,
         "minimum_required_rank": required_rank,
+        **stability,
+        "maximum_allowed_normalized_design_condition_number": MAX_NORMALIZED_DESIGN_CONDITION_NUMBER,
+        "minimum_required_normalized_singular_value": MIN_NORMALIZED_DESIGN_SINGULAR_VALUE,
+        "normalized_parameter_space_margin": parameter_space_margin,
+        "parameter_space_margin_is_informational": True,
         "conditional_variation": conditional_variation,
-        "decision_rule": "compiler_declared_basis_full_rank",
+        "decision_rule": "compiler_declared_basis_full_rank_and_numerically_stable",
     }
     return evidence, issues
 
 
 def _require_identifiability_ready(corpus: Mapping[str, Any]) -> None:
     evidence = corpus.get("identifiability_evidence")
-    if not isinstance(evidence, Mapping):
+    if (
+        corpus.get("schema_version") != 4
+        or not isinstance(evidence, Mapping)
+        or evidence.get("schema_version") != 3
+    ):
         _fail(
             "DUT_CORPUS_IDENTIFIABILITY_EVIDENCE_MISSING",
-            "The corpus has no persisted parameter-identifiability evidence.",
-            details={"field": "identifiability_evidence"},
-            next_action="Re-onboard the labeled DUT corpus with the current identifiability analysis.",
+            "The corpus has no current rank-and-stability identifiability evidence.",
+            details={
+                "field": "identifiability_evidence",
+                "corpus_schema_version": corpus.get("schema_version"),
+                "evidence_schema_version": (
+                    evidence.get("schema_version")
+                    if isinstance(evidence, Mapping)
+                    else None
+                ),
+            },
+            next_action="Re-onboard the labeled DUT corpus with current rank, singular-value, and condition-number analysis.",
         )
     model_spec = corpus.get("compiler_model_spec")
     if (
@@ -605,6 +791,8 @@ def _require_identifiability_ready(corpus: Mapping[str, Any]) -> None:
     blocker_count = evidence.get("blocker_count")
     rank = evidence.get("normalized_design_matrix_rank")
     required_rank = evidence.get("minimum_required_rank")
+    minimum_singular_value = evidence.get("minimum_normalized_singular_value")
+    condition_number = evidence.get("normalized_design_condition_number")
     if (
         evidence.get("status") != "sufficient"
         or blocker_count != 0
@@ -613,6 +801,13 @@ def _require_identifiability_ready(corpus: Mapping[str, Any]) -> None:
         or isinstance(required_rank, bool)
         or not isinstance(required_rank, int)
         or rank < required_rank
+        or isinstance(minimum_singular_value, bool)
+        or not isinstance(minimum_singular_value, (int, float))
+        or float(minimum_singular_value)
+        < MIN_NORMALIZED_DESIGN_SINGULAR_VALUE
+        or isinstance(condition_number, bool)
+        or not isinstance(condition_number, (int, float))
+        or float(condition_number) > MAX_NORMALIZED_DESIGN_CONDITION_NUMBER
     ):
         issues = evidence.get("issues")
         _fail(
@@ -630,8 +825,10 @@ def _require_identifiability_ready(corpus: Mapping[str, Any]) -> None:
                 else [],
                 "normalized_design_matrix_rank": rank,
                 "minimum_required_rank": required_rank,
+                "minimum_normalized_singular_value": minimum_singular_value,
+                "normalized_design_condition_number": condition_number,
             },
-            next_action="Add DUT examples that make the declared compiler basis full-rank, then onboard a new corpus version.",
+            next_action="Add DUT examples that make the declared compiler basis full-rank and numerically stable, then onboard a new corpus version.",
         )
 
 
@@ -761,7 +958,7 @@ def onboard_dut_corpus(
             "generalization_claim_allowed": False,
         }
         corpus = {
-            "schema_version": 3,
+            "schema_version": 4,
             "artifact_type": "DutCorpusArtifact",
             "technology_identity": immutable_json_copy(technology_identity),
             "device_family": device_family,
@@ -851,12 +1048,12 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             details={"field": "package_path", "error_type": type(exc).__name__},
             next_action="Restore the exact content-addressed corpus package.",
         )
-    if not isinstance(corpus, dict) or corpus.get("schema_version") not in {1, 2, 3} or corpus.get("artifact_type") != "DutCorpusArtifact":
+    if not isinstance(corpus, dict) or corpus.get("schema_version") not in {1, 2, 3, 4} or corpus.get("artifact_type") != "DutCorpusArtifact":
         _fail(
             "DUT_CORPUS_PACKAGE_SCHEMA_INVALID",
             "Corpus metadata does not match the supported DutCorpusArtifact schema.",
             details={"field": "corpus.json", "schema_version": corpus.get("schema_version") if isinstance(corpus, dict) else None, "artifact_type": corpus.get("artifact_type") if isinstance(corpus, dict) else None},
-            next_action="Restore a supported schema_version 1, 2, or 3 DutCorpusArtifact package.",
+            next_action="Restore a supported schema_version 1, 2, 3, or 4 DutCorpusArtifact package.",
         )
     required_mappings = (
         "technology_identity",
@@ -898,7 +1095,7 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             details={"field": "technology_identity", "invalid_fields": invalid_technology_fields},
             next_action="Restore exact technology and PDK revision identity.",
         )
-    if corpus.get("schema_version") in {2, 3}:
+    if corpus.get("schema_version") in {2, 3, 4}:
         evidence = corpus.get("identifiability_evidence")
         issues = evidence.get("issues") if isinstance(evidence, Mapping) else None
         conditional = (
@@ -912,7 +1109,7 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
         if (
             not isinstance(evidence, Mapping)
             or evidence.get("schema_version")
-            != (2 if corpus.get("schema_version") == 3 else 1)
+            != ({2: 1, 3: 2, 4: 3}[corpus.get("schema_version")])
             or evidence.get("status") not in {"sufficient", "blocked"}
             or isinstance(blocker_count, bool)
             or not isinstance(blocker_count, int)
@@ -932,6 +1129,68 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             or not isinstance(evidence.get("normalized_design_matrix_rank"), int)
             or isinstance(evidence.get("minimum_required_rank"), bool)
             or not isinstance(evidence.get("minimum_required_rank"), int)
+            or (
+                corpus.get("schema_version") == 4
+                and (
+                    not isinstance(evidence.get("normalized_singular_values"), list)
+                    or len(evidence.get("normalized_singular_values", []))
+                    != evidence.get("minimum_required_rank")
+                    or any(
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                        or float(value) < 0
+                        for value in evidence.get("normalized_singular_values", [])
+                    )
+                    or isinstance(evidence.get("minimum_normalized_singular_value"), bool)
+                    or not isinstance(evidence.get("minimum_normalized_singular_value"), (int, float))
+                    or not math.isfinite(float(evidence.get("minimum_normalized_singular_value")))
+                    or evidence.get("minimum_normalized_singular_value") < 0
+                    or isinstance(evidence.get("maximum_normalized_singular_value"), bool)
+                    or not isinstance(evidence.get("maximum_normalized_singular_value"), (int, float))
+                    or not math.isfinite(float(evidence.get("maximum_normalized_singular_value")))
+                    or evidence.get("maximum_normalized_singular_value") < 0
+                    or (
+                        evidence.get("normalized_singular_values")
+                        and (
+                            evidence.get("minimum_normalized_singular_value")
+                            != evidence.get("normalized_singular_values")[0]
+                            or evidence.get("maximum_normalized_singular_value")
+                            != evidence.get("normalized_singular_values")[-1]
+                        )
+                    )
+                    or (
+                        evidence.get("normalized_design_condition_number") is not None
+                        and (
+                            isinstance(evidence.get("normalized_design_condition_number"), bool)
+                            or not isinstance(evidence.get("normalized_design_condition_number"), (int, float))
+                            or not math.isfinite(float(evidence.get("normalized_design_condition_number")))
+                            or evidence.get("normalized_design_condition_number") < 1
+                        )
+                    )
+                    or evidence.get("maximum_allowed_normalized_design_condition_number")
+                    != MAX_NORMALIZED_DESIGN_CONDITION_NUMBER
+                    or evidence.get("minimum_required_normalized_singular_value")
+                    != MIN_NORMALIZED_DESIGN_SINGULAR_VALUE
+                    or isinstance(evidence.get("normalized_parameter_space_margin"), bool)
+                    or not isinstance(evidence.get("normalized_parameter_space_margin"), (int, float))
+                    or not math.isfinite(float(evidence.get("normalized_parameter_space_margin")))
+                    or evidence.get("normalized_parameter_space_margin") < 0
+                    or evidence.get("parameter_space_margin_is_informational") is not True
+                    or evidence.get("decision_rule")
+                    != "compiler_declared_basis_full_rank_and_numerically_stable"
+                    or (
+                        evidence.get("status") == "sufficient"
+                        and (
+                            not isinstance(evidence.get("normalized_design_condition_number"), (int, float))
+                            or evidence.get("normalized_design_condition_number")
+                            > MAX_NORMALIZED_DESIGN_CONDITION_NUMBER
+                            or evidence.get("minimum_normalized_singular_value")
+                            < MIN_NORMALIZED_DESIGN_SINGULAR_VALUE
+                        )
+                    )
+                )
+            )
             or (evidence.get("status") == "sufficient") != (blocker_count == 0)
         ):
             _fail(
@@ -940,7 +1199,7 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
                 details={"field": "identifiability_evidence"},
                 next_action="Restore or re-onboard the exact labeled DUT corpus.",
             )
-    if corpus.get("schema_version") == 3:
+    if corpus.get("schema_version") in {3, 4}:
         normalized_model_spec = _validate_compiler_model_spec(
             corpus.get("compiler_model_spec"), schema=corpus["parameter_schema"]
         )
@@ -949,7 +1208,7 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
                 "DUT_CORPUS_COMPILER_MODEL_BINDING_INVALID",
                 "Persisted compiler model basis is not canonical.",
                 details={"field": "compiler_model_spec"},
-                next_action="Restore or re-onboard the exact schema_version 3 corpus.",
+                next_action="Restore or re-onboard the exact current corpus schema.",
             )
     dut_ids: list[str] = []
     for index, record in enumerate(corpus["dut_records"]):
@@ -1163,10 +1422,9 @@ def _validate_scorecard_evidence(
     qualification_scoring_policy = {
         name: qualification_policy.get(name)
         for name in (
-            "absolute_tolerance",
-            "relative_tolerance",
             "minimum_aggregate_score",
             "exact_fingerprint_required",
+            "metric_rules",
         )
     }
     if policy != qualification_scoring_policy:
@@ -1198,7 +1456,7 @@ def _validate_scorecard_evidence(
         )
     available_metrics = tuple(
         sorted(
-            set.intersection(
+            set().union(
                 *(set(record["flat_metrics"]) for record in corpus["dut_records"])
             )
         )
@@ -1225,6 +1483,7 @@ def _validate_scorecard_evidence(
         )
     expected_validation = set(corpus["partition"].get("validation_dut_ids", []))
     expected_ids = {record["dut_id"] for record in corpus["dut_records"]}
+    reference_by_id = {record["dut_id"]: record for record in corpus["dut_records"]}
     per_dut = scorecard.get("per_dut")
     if not isinstance(per_dut, list) or len(per_dut) != len(expected_ids):
         _fail(
@@ -1235,9 +1494,23 @@ def _validate_scorecard_evidence(
         )
     seen: set[str] = set()
     exact_required = policy.get("exact_fingerprint_required") is True
-    required_metrics = set(qualification_policy["required_metrics"])
+    threshold = float(policy["minimum_aggregate_score"])
+    rules_by_metric = {
+        rule["metric"]: rule for rule in qualification_policy["metric_rules"]
+    }
+    validated_by_cohort: dict[str, list[float]] = {
+        "train_reference": [],
+        "logical_validation": [],
+    }
     for item in per_dut:
-        dut_id = item.get("dut_id") if isinstance(item, Mapping) else None
+        if not isinstance(item, Mapping):
+            _fail(
+                "ADAPTER_CANDIDATE_SCORECARD_STRUCTURE_INVALID",
+                "Every per-DUT score result must be an object.",
+                details={"received_type": type(item).__name__},
+                next_action="Regenerate the scorecard using the exact corpus and compiler output.",
+            )
+        dut_id = item.get("dut_id")
         expected_cohort = "logical_validation" if dut_id in expected_validation else "train_reference"
         metric_results = item.get("metrics") if isinstance(item, Mapping) else None
         metrics_by_name = (
@@ -1249,40 +1522,156 @@ def _validate_scorecard_evidence(
             if isinstance(metric_results, list)
             else {}
         )
-        required_metrics_failed = sorted(
-            metric
-            for metric in required_metrics
-            if metric not in metrics_by_name
-            or metrics_by_name[metric].get("status") != "passed"
-            or metrics_by_name[metric].get("hard_fail") is not False
-            or metrics_by_name[metric].get("required_for_qualification") is not True
+        expected_metric_names = (
+            set(reference_by_id[dut_id]["flat_metrics"])
+            if dut_id in reference_by_id
+            else set()
+        )
+        metric_names_valid = (
+            isinstance(metric_results, list)
+            and len(metric_results) == len(metrics_by_name)
+            and set(metrics_by_name) == expected_metric_names
+        )
+        invalid_metric_results: list[str] = []
+        weighted_total = 0.0
+        total_weight = 0.0
+        if metric_names_valid:
+            for metric in sorted(expected_metric_names):
+                result = metrics_by_name[metric]
+                rule = rules_by_metric[metric]
+                reference_value = reference_by_id[dut_id]["flat_metrics"][metric]
+                candidate_value = result.get("candidate")
+                score = result.get("score")
+                absolute_delta = result.get("absolute_delta")
+                if (
+                    isinstance(candidate_value, bool)
+                    or not isinstance(candidate_value, (int, float))
+                    or not math.isfinite(float(candidate_value))
+                    or isinstance(score, bool)
+                    or not isinstance(score, (int, float))
+                    or not math.isfinite(float(score))
+                    or isinstance(absolute_delta, bool)
+                    or not isinstance(absolute_delta, (int, float))
+                    or not math.isfinite(float(absolute_delta))
+                ):
+                    invalid_metric_results.append(metric)
+                    continue
+                if rule["comparison"] == "exact":
+                    expected_passed = candidate_value == reference_value
+                    expected_score = 1.0 if expected_passed else 0.0
+                    expected_delta = abs(float(candidate_value) - float(reference_value))
+                else:
+                    expected_score, expected_delta, expected_passed = _metric_similarity(
+                        float(reference_value),
+                        float(candidate_value),
+                        float(rule["absolute_tolerance"]),
+                        float(rule["relative_tolerance"]),
+                    )
+                expected_fields = {
+                    "metric_kind": rule["metric_kind"],
+                    "comparison": rule["comparison"],
+                    "absolute_tolerance": rule["absolute_tolerance"],
+                    "relative_tolerance": rule["relative_tolerance"],
+                    "weight": rule["weight"],
+                    "policy_hard_fail": rule["hard_fail"],
+                    "reference": reference_value,
+                    "status": "passed" if expected_passed else "failed",
+                    "hard_fail": rule["hard_fail"] and not expected_passed,
+                }
+                if (
+                    any(result.get(name) != value for name, value in expected_fields.items())
+                    or not math.isclose(float(score), expected_score, rel_tol=0.0, abs_tol=1e-12)
+                    or not math.isclose(
+                        float(absolute_delta),
+                        expected_delta,
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    )
+                ):
+                    invalid_metric_results.append(metric)
+                weight = float(rule["weight"])
+                if weight > 0:
+                    weighted_total += expected_score * weight
+                    total_weight += weight
+        aggregate_score = weighted_total / total_weight if total_weight > 0 else 0.0
+        fingerprint_match = (
+            isinstance(item, Mapping)
+            and item.get("reference_geometry_fingerprint_sha256")
+            == item.get("candidate_geometry_fingerprint_sha256")
+        )
+        expected_aggregate = (
+            aggregate_score if not exact_required or fingerprint_match else 0.0
+        )
+        expected_hard_fail_reasons = []
+        if exact_required and not fingerprint_match:
+            expected_hard_fail_reasons.append("EXACT_GEOMETRY_FINGERPRINT_MISMATCH")
+        expected_hard_fail_reasons.extend(
+            f"POLICY_METRIC_FAILED:{metric}"
+            for metric in sorted(expected_metric_names)
+            if rules_by_metric[metric]["hard_fail"]
+            and metrics_by_name.get(metric, {}).get("status") != "passed"
+        )
+        expected_passed = (
+            expected_aggregate >= threshold and not expected_hard_fail_reasons
+        )
+        received_aggregate = item.get("aggregate_score")
+        aggregate_valid = (
+            not isinstance(received_aggregate, bool)
+            and isinstance(received_aggregate, (int, float))
+            and math.isfinite(float(received_aggregate))
+            and math.isclose(
+                float(received_aggregate),
+                expected_aggregate,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
         )
         if (
             dut_id not in expected_ids
             or dut_id in seen
             or item.get("cohort") != expected_cohort
-            or item.get("passed") is not True
+            or not metric_names_valid
+            or invalid_metric_results
+            or not aggregate_valid
+            or item.get("passed") is not expected_passed
+            or expected_passed is not True
             or not isinstance(item.get("hard_fail_reasons"), list)
-            or item.get("hard_fail_reasons")
+            or item.get("hard_fail_reasons") != expected_hard_fail_reasons
             or item.get("exact_fingerprint_required") is not exact_required
-            or (exact_required and item.get("exact_geometry_match") is not True)
-            or required_metrics_failed
+            or item.get("exact_geometry_match") is not fingerprint_match
             or not SHA256_PATTERN.fullmatch(str(item.get("reference_geometry_fingerprint_sha256", "")))
             or not SHA256_PATTERN.fullmatch(str(item.get("candidate_geometry_fingerprint_sha256", "")))
         ):
             _fail(
                 "ADAPTER_CANDIDATE_SCORECARD_STRUCTURE_INVALID",
                 "A per-DUT score result is missing, duplicated, failed, or bound to the wrong cohort.",
-                details={"dut_id": dut_id, "expected_cohort": expected_cohort, "required_metrics_failed": required_metrics_failed},
+                details={
+                    "dut_id": dut_id,
+                    "expected_cohort": expected_cohort,
+                    "expected_metric_names": sorted(expected_metric_names),
+                    "received_metric_names": sorted(str(name) for name in metrics_by_name),
+                    "invalid_metric_results": invalid_metric_results,
+                },
                 next_action="Regenerate the scorecard using the exact corpus and compiler output.",
             )
         seen.add(dut_id)
+        validated_by_cohort[expected_cohort].append(expected_aggregate)
     cohorts = scorecard.get("cohorts")
-    if not isinstance(cohorts, Mapping) or set(cohorts) != {"train_reference", "logical_validation"} or any(not isinstance(value, Mapping) or value.get("passed") is not True for value in cohorts.values()):
+    expected_cohorts = {}
+    for cohort, scores in validated_by_cohort.items():
+        aggregate = sum(scores) / len(scores) if scores else 0.0
+        expected_cohorts[cohort] = {
+            "dut_count": len(scores),
+            "aggregate_score": aggregate,
+            "passed": bool(scores) and aggregate >= threshold,
+        }
+    if cohorts != expected_cohorts or any(
+        value["passed"] is not True for value in expected_cohorts.values()
+    ):
         _fail(
             "ADAPTER_CANDIDATE_SCORECARD_STRUCTURE_INVALID",
             "Both required scorecard cohorts must exist and pass.",
-            details={"cohorts": cohorts},
+            details={"expected_cohorts": expected_cohorts, "received_cohorts": cohorts},
             next_action="Regenerate the scorecard and correct every failed cohort.",
         )
 
@@ -1379,6 +1768,22 @@ def _metric_similarity(reference: float, candidate: float, absolute_tolerance: f
     return max(0.0, 1.0 - delta / scale), delta, False
 
 
+def _diagnostic_metric_rule(
+    metric: str, *, absolute_tolerance: float, relative_tolerance: float
+) -> dict[str, Any]:
+    """Expand the legacy caller policy into explicit, non-qualifying metric rules."""
+
+    return {
+        "metric": metric,
+        "metric_kind": qualification_metric_kind(metric),
+        "comparison": "numeric_tolerance",
+        "absolute_tolerance": absolute_tolerance,
+        "relative_tolerance": relative_tolerance,
+        "weight": 1.0,
+        "hard_fail": False,
+    }
+
+
 def score_reproduced_corpus(
     *,
     corpus_package_path: str | Path,
@@ -1472,7 +1877,7 @@ def score_reproduced_corpus(
     reference_by_id = {record["dut_id"]: record for record in corpus["dut_records"]}
     available_metrics = tuple(
         sorted(
-            set.intersection(
+            set().union(
                 *(set(record["flat_metrics"]) for record in corpus["dut_records"])
             )
         )
@@ -1491,21 +1896,21 @@ def score_reproduced_corpus(
         effective_policy = {
             name: qualification_policy[name]
             for name in (
-                "absolute_tolerance",
-                "relative_tolerance",
                 "minimum_aggregate_score",
                 "exact_fingerprint_required",
+                "metric_rules",
             )
         }
         policy_class = "host_approved_candidate_qualification"
-    absolute_tolerance = float(effective_policy["absolute_tolerance"])
-    relative_tolerance = float(effective_policy["relative_tolerance"])
     threshold = float(effective_policy["minimum_aggregate_score"])
     exact_required = bool(effective_policy["exact_fingerprint_required"])
-    required_metrics = set(
-        qualification_policy.get("required_metrics", [])
+    qualification_rules = (
+        {
+            rule["metric"]: rule
+            for rule in effective_policy["metric_rules"]
+        }
         if qualification_policy is not None
-        else []
+        else {}
     )
     missing_cells = sorted(set(reference_by_id).difference(reproduced_cell_by_dut_id))
     unexpected_cells = sorted(set(reproduced_cell_by_dut_id).difference(reference_by_id))
@@ -1572,35 +1977,98 @@ def score_reproduced_corpus(
             metric_names = sorted(set(reference_metrics) | set(candidate_metrics))
             metrics = []
             for metric in metric_names:
+                rule = qualification_rules.get(metric)
+                if rule is None and qualification_policy is None:
+                    rule = _diagnostic_metric_rule(
+                        metric,
+                        absolute_tolerance=absolute_tolerance,
+                        relative_tolerance=relative_tolerance,
+                    )
                 if metric not in reference_metrics or metric not in candidate_metrics:
-                    metrics.append({"metric": metric, "status": "missing", "score": 0.0, "hard_fail": True})
+                    metrics.append({
+                        "metric": metric,
+                        "metric_kind": (
+                            rule.get("metric_kind") if rule is not None else qualification_metric_kind(metric)
+                        ),
+                        "comparison": rule.get("comparison") if rule is not None else None,
+                        "absolute_tolerance": rule.get("absolute_tolerance") if rule is not None else None,
+                        "relative_tolerance": rule.get("relative_tolerance") if rule is not None else None,
+                        "weight": rule.get("weight") if rule is not None else 0.0,
+                        "policy_hard_fail": rule.get("hard_fail") if rule is not None else True,
+                        "status": "missing_or_unapproved",
+                        "score": 0.0,
+                        "hard_fail": True,
+                    })
                     continue
-                score, delta, passed = _metric_similarity(
-                    float(reference_metrics[metric]),
-                    float(candidate_metrics[metric]),
-                    absolute_tolerance,
-                    relative_tolerance,
-                )
-                required_metric_failed = metric in required_metrics and not passed
+                if rule is None:
+                    metrics.append({
+                        "metric": metric,
+                        "metric_kind": qualification_metric_kind(metric),
+                        "comparison": None,
+                        "absolute_tolerance": None,
+                        "relative_tolerance": None,
+                        "weight": 0.0,
+                        "policy_hard_fail": True,
+                        "reference": reference_metrics[metric],
+                        "candidate": candidate_metrics[metric],
+                        "status": "unapproved_metric",
+                        "score": 0.0,
+                        "hard_fail": True,
+                    })
+                    continue
+                if rule["comparison"] == "exact":
+                    delta = abs(
+                        float(candidate_metrics[metric])
+                        - float(reference_metrics[metric])
+                    )
+                    passed = candidate_metrics[metric] == reference_metrics[metric]
+                    score = 1.0 if passed else 0.0
+                else:
+                    score, delta, passed = _metric_similarity(
+                        float(reference_metrics[metric]),
+                        float(candidate_metrics[metric]),
+                        float(rule["absolute_tolerance"]),
+                        float(rule["relative_tolerance"]),
+                    )
                 metrics.append({
                     "metric": metric,
+                    "metric_kind": rule["metric_kind"],
+                    "comparison": rule["comparison"],
+                    "absolute_tolerance": rule["absolute_tolerance"],
+                    "relative_tolerance": rule["relative_tolerance"],
+                    "weight": rule["weight"],
+                    "policy_hard_fail": rule["hard_fail"],
                     "reference": reference_metrics[metric],
                     "candidate": candidate_metrics[metric],
                     "absolute_delta": delta,
                     "score": score,
                     "status": "passed" if passed else "failed",
-                    "required_for_qualification": metric in required_metrics,
-                    "hard_fail": required_metric_failed,
+                    "hard_fail": rule["hard_fail"] and not passed,
                 })
             fingerprint_match = reference["geometry_fingerprint_sha256"] == candidate["geometry_fingerprint_sha256"]
-            metric_score = sum(item["score"] for item in metrics) / len(metrics) if metrics else 0.0
+            weighted_metrics = [
+                item
+                for item in metrics
+                if isinstance(item.get("weight"), (int, float))
+                and not isinstance(item.get("weight"), bool)
+                and float(item["weight"]) > 0
+            ]
+            total_weight = sum(float(item["weight"]) for item in weighted_metrics)
+            metric_score = (
+                sum(float(item["score"]) * float(item["weight"]) for item in weighted_metrics)
+                / total_weight
+                if total_weight > 0
+                else 0.0
+            )
             dut_score = metric_score if not exact_required or fingerprint_match else 0.0
             hard_fail_reasons = []
             if exact_required and not fingerprint_match:
                 hard_fail_reasons.append("EXACT_GEOMETRY_FINGERPRINT_MISMATCH")
+            if total_weight <= 0:
+                hard_fail_reasons.append("NO_WEIGHTED_POLICY_METRICS")
             if any(item["hard_fail"] for item in metrics):
                 hard_fail_reasons.extend(
-                    f"REQUIRED_METRIC_FAILED:{item['metric']}"
+                    f"POLICY_METRIC_FAILED:{item['metric']}"
                     for item in metrics
                     if item["hard_fail"]
                 )

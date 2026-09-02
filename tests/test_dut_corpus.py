@@ -12,6 +12,7 @@ from klayout_mcp.dut_corpus import (
 )
 from klayout_mcp.errors import AnalysisError
 from klayout_mcp.klayout_adapter import find_klayout_executable
+from klayout_mcp.qualification_policy import qualification_metric_kind
 from klayout_mcp.technology_registry import TechnologyAdapterRegistry
 from klayout_mcp.workflow_manifest import canonical_json_bytes, canonical_sha256
 
@@ -58,23 +59,38 @@ class TrustedQualificationAuthority:
         minimum_aggregate_score=1.0,
         exact_fingerprint_required=True,
         required_metrics=("active.width_um",),
+        metric_overrides=None,
     ):
         self.minimum_aggregate_score = minimum_aggregate_score
         self.exact_fingerprint_required = exact_fingerprint_required
-        self.required_metrics = list(required_metrics)
+        self.required_metrics = set(required_metrics)
+        self.metric_overrides = metric_overrides or {}
 
     def issue_policy(self, *, corpus_sha256, compiler_identity, available_metrics):
+        metric_rules = []
+        for metric in available_metrics:
+            metric_kind = qualification_metric_kind(metric)
+            exact = metric_kind in {"binary", "count"}
+            rule = {
+                "metric": metric,
+                "metric_kind": metric_kind,
+                "comparison": "exact" if exact else "numeric_tolerance",
+                "absolute_tolerance": 0.0 if exact else 1e-12,
+                "relative_tolerance": 0.0 if exact else 1e-12,
+                "weight": 1.0,
+                "hard_fail": metric in self.required_metrics,
+            }
+            rule.update(self.metric_overrides.get(metric, {}))
+            metric_rules.append(rule)
         policy = {
-            "schema_version": 1,
+            "schema_version": 2,
             "artifact_type": "AdapterQualificationPolicy",
             "authority_id": self.authority_id,
             "policy_id": "transistor-geometry-qualification",
-            "policy_version": "1",
-            "absolute_tolerance": 1e-12,
-            "relative_tolerance": 1e-12,
+            "policy_version": "2",
             "minimum_aggregate_score": self.minimum_aggregate_score,
             "exact_fingerprint_required": self.exact_fingerprint_required,
-            "required_metrics": self.required_metrics,
+            "metric_rules": metric_rules,
         }
         receipt = {
             "approved": True,
@@ -343,6 +359,25 @@ def test_labeled_corpus_round_trip_scoring_and_candidate_package(tmp_path: Path)
         )
     assert arbitrary_pass.value.code == "ADAPTER_CANDIDATE_SCORECARD_STRUCTURE_INVALID"
 
+    forged_metric_scorecard = json.loads(json.dumps(score["scorecard"]))
+    forged_metric_scorecard["per_dut"][0]["metrics"][0]["weight"] = 999.0
+    forged_metric_scorecard_path = _write_json_package(
+        tmp_path / "forged-metric-scores",
+        "scorecard.json",
+        forged_metric_scorecard,
+    )
+    with pytest.raises(AnalysisError) as forged_metric:
+        build_technology_adapter_candidate(
+            corpus_package_path=corpus["package_path"],
+            resolution_package_path=resolution["package_path"],
+            scorecard_package_path=forged_metric_scorecard_path,
+            adapter_identity=_identity(),
+            compiler_code_sha256="f" * 64,
+            adapter_root=tmp_path / "forged-metric-adapters",
+            qualification_policy_authority=TrustedQualificationAuthority(),
+        )
+    assert forged_metric.value.code == "ADAPTER_CANDIDATE_SCORECARD_STRUCTURE_INVALID"
+
 
 def test_same_parameters_different_geometry_requires_reference_choice(tmp_path: Path) -> None:
     source = tmp_path / "corpus.gds"
@@ -513,7 +548,7 @@ def test_exact_fingerprint_and_dbu_are_threshold_independent_hard_gates(
     )
     assert all(
         item["passed"] is False
-        and "REQUIRED_METRIC_FAILED:active.width_um" in item["hard_fail_reasons"]
+        and "POLICY_METRIC_FAILED:active.width_um" in item["hard_fail_reasons"]
         for item in qualification_score["scorecard"]["per_dut"]
     )
 
@@ -534,6 +569,138 @@ def test_exact_fingerprint_and_dbu_are_threshold_independent_hard_gates(
         )
 
     assert dbu_mismatch.value.code == "REPRODUCED_CORPUS_DBU_MISMATCH"
+
+
+def test_qualification_policy_applies_typed_per_metric_rules(tmp_path: Path) -> None:
+    source = tmp_path / "typed-policy-source.gds"
+    source.write_bytes(b"typed policy corpus")
+    reproduced = tmp_path / "typed-policy-output.gds"
+    reproduced.write_bytes(b"typed policy compiler output")
+
+    def worker(width, height, fingerprint):
+        def run(request, **kwargs):
+            return {
+                "ok": True,
+                "dbu_um": 0.001,
+                "layout_cell_count": len(request["dut_records"]),
+                "observations": [
+                    {
+                        "dut_id": record["dut_id"],
+                        "cell_name": record["cell_name"],
+                        "geometry_fingerprint_sha256": fingerprint * 64,
+                        "bbox_um": [0, 0, width, height],
+                        "layer_metrics": {
+                            "active": {
+                                "present": True,
+                                "polygon_count": 1,
+                                "width_um": width,
+                                "height_um": height,
+                                "area_um2": width * height,
+                                "bbox_um": [0, 0, width, height],
+                            }
+                        },
+                    }
+                    for record in request["dut_records"]
+                ],
+            }
+
+        return run
+
+    corpus = onboard_dut_corpus(
+        source_layout_path=str(source),
+        technology_identity={"technology": "tech-a", "pdk_revision": "r7"},
+        device_family="finfet",
+        topology="nmos-core",
+        parameter_schema={"gate_length_nm": {"unit": "nm", "kind": "continuous"}},
+        compiler_model_spec=_main_effect_model_spec("gate_length_nm"),
+        dut_records=_records(),
+        layer_roles={
+            "active": {"layer": 2, "datatype": 0},
+            "gate": {"layer": 6, "datatype": 0},
+        },
+        validation_dut_ids=["D3"],
+        package_root=tmp_path / "typed-policy-corpora",
+        worker_runner=worker(1.0, 1.0, "1"),
+    )
+    authority = TrustedQualificationAuthority(
+        minimum_aggregate_score=0.5,
+        exact_fingerprint_required=False,
+        required_metrics=("active.area_um2", "active.polygon_count", "active.present"),
+        metric_overrides={
+            "active.width_um": {
+                "absolute_tolerance": 0.2,
+                "relative_tolerance": 0.0,
+                "weight": 3.0,
+            },
+            "active.height_um": {
+                "absolute_tolerance": 0.2,
+                "relative_tolerance": 0.0,
+                "weight": 2.0,
+            },
+            "active.area_um2": {
+                "absolute_tolerance": 0.01,
+                "relative_tolerance": 0.0,
+                "weight": 5.0,
+                "hard_fail": True,
+            },
+        },
+    )
+
+    score = score_reproduced_corpus(
+        corpus_package_path=corpus["package_path"],
+        reproduced_layout_path=str(reproduced),
+        reproduced_cell_by_dut_id={"D1": "R1", "D2": "R2", "D3": "R3"},
+        scoring_policy={
+            "absolute_tolerance": 999,
+            "relative_tolerance": 999,
+            "minimum_aggregate_score": 0,
+            "exact_fingerprint_required": False,
+        },
+        scorecard_root=tmp_path / "typed-policy-scores",
+        compiler_identity=_compiler_identity(corpus),
+        qualification_policy_authority=authority,
+        worker_runner=worker(1.1, 1.1, "2"),
+    )
+
+    rules = {
+        rule["metric"]: rule
+        for rule in score["scorecard"]["qualification_policy"]["metric_rules"]
+    }
+    assert rules["active.width_um"]["metric_kind"] == "length_um"
+    assert rules["active.area_um2"]["metric_kind"] == "area_um2"
+    assert rules["active.polygon_count"]["comparison"] == "exact"
+    for result in score["scorecard"]["per_dut"]:
+        metrics = {metric["metric"]: metric for metric in result["metrics"]}
+        assert metrics["active.width_um"]["status"] == "passed"
+        assert metrics["active.area_um2"]["status"] == "failed"
+        assert metrics["active.area_um2"]["hard_fail"] is True
+        assert result["passed"] is False
+        assert "POLICY_METRIC_FAILED:active.area_um2" in result["hard_fail_reasons"]
+
+    with pytest.raises(AnalysisError) as invalid_units:
+        score_reproduced_corpus(
+            corpus_package_path=corpus["package_path"],
+            reproduced_layout_path=str(reproduced),
+            reproduced_cell_by_dut_id={"D1": "R1", "D2": "R2", "D3": "R3"},
+            scoring_policy={
+                "absolute_tolerance": 0,
+                "relative_tolerance": 0,
+                "minimum_aggregate_score": 1,
+                "exact_fingerprint_required": True,
+            },
+            scorecard_root=tmp_path / "invalid-unit-scores",
+            compiler_identity=_compiler_identity(corpus),
+            qualification_policy_authority=TrustedQualificationAuthority(
+                metric_overrides={
+                    "active.width_um": {"metric_kind": "area_um2"}
+                }
+            ),
+            worker_runner=worker(1.0, 1.0, "1"),
+        )
+    assert invalid_units.value.code == "ADAPTER_QUALIFICATION_POLICY_INVALID"
+    assert invalid_units.value.details["invalid_metric_rules"][0][
+        "expected_metric_kind"
+    ] == "length_um"
 
 
 def test_collinear_doe_blockers_are_persisted_and_block_downstream_use(
@@ -761,6 +928,26 @@ def test_identifiability_uses_declared_interaction_basis_not_oat_heuristic(
     )
     assert blocked_regime["corpus"]["identifiability_evidence"]["status"] == "blocked"
     assert covered_regime["corpus"]["identifiability_evidence"]["status"] == "sufficient"
+
+    nearly_collinear = onboard_dut_corpus(
+        **common,
+        compiler_model_spec=_main_effect_model_spec("gate_length_nm", "cpp_nm"),
+        dut_records=records(
+            [(40, 80), (50, 90), (60, 100.000001), (70, 75)]
+        ),
+        validation_dut_ids=["D4"],
+        package_root=tmp_path / "nearly-collinear-corpora",
+    )
+    stability = nearly_collinear["corpus"]["identifiability_evidence"]
+    assert stability["normalized_design_matrix_rank"] == 3
+    assert stability["minimum_required_rank"] == 3
+    assert stability["status"] == "blocked"
+    assert stability["normalized_design_condition_number"] > 10_000
+    assert stability["minimum_normalized_singular_value"] < 1e-4
+    assert stability["normalized_parameter_space_margin"] > 0
+    assert {
+        issue["code"] for issue in stability["issues"]
+    } == {"DUT_COMPILER_BASIS_NUMERICALLY_UNSTABLE"}
 
 
 @pytest.mark.parametrize(

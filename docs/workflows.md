@@ -227,7 +227,12 @@ fitting 계산에서 제외하지만 같은 source GDS와 metadata에 남는다.
 
 `compiler_model_spec`에는 실제 compiler가 사용하는 basis를 명시한다. 지원 항목은 intercept,
 parameter main effect, 여러 parameter interaction, 숫자 category indicator와 threshold-based regime다.
-Training DUT로 만든 그 basis matrix가 full rank인지 검사한다. 따라서 L과 CPP의 각 축 예제가 있어도
+Training DUT로 만든 그 basis matrix가 full rank인지 검사한다. 이어 각 열의 크기를 정규화한 뒤
+minimum singular value와 condition number를 검사한다. 따라서 형식상 full rank여도 L, CPP와 cell
+height가 거의 같은 비율로 움직여 작은 입력 오차가 큰 coefficient 변화를 만드는 DOE는 차단한다.
+현재 고정 gate는 minimum normalized singular value `1e-4` 이상, normalized condition number
+`10000` 이하다. Parameter-space minimum margin도 evidence에 기록하지만 추가 근접 샘플 하나가 있다는
+이유만으로 정상 DOE를 막지 않도록 참고 정보로만 사용한다. 따라서 L과 CPP의 각 축 예제가 있어도
 `L×CPP` 항이 식별되지 않으면 차단하고, 반대로 일반 DOE가 full rank라면 one-factor-at-a-time 쌍이
 없다는 이유만으로 차단하지 않는다. Conditional-variation 쌍은 이해를 돕는 정보일 뿐 합격 조건이
 아니다. 부족한 basis와 rank는 `identifiability_evidence`에 영구 저장되며 score와 candidate 생성은
@@ -240,9 +245,12 @@ drawing-style 후보이며 공정 규칙으로 승격되지 않는다.
 Score는 reproduced train/validation cell을 실제로 다시 읽어 비교한다. MCP 호출자가 전달하는
 `scoring_policy`는 진단용이다. Stock처럼 host `qualification_policy_authority`가 없으면 scorecard를
 만들 수는 있지만 adapter candidate에는 사용할 수 없다. Candidate용 score는 host authority가 발행한
-policy ID/version/hash, 승인자, corpus/compiler binding과 non-revoked receipt를 저장하며, 지정된 필수
-metric 하나라도 tolerance를 벗어나면 평균점수와 무관하게 실패한다. Candidate build 시 authority가
-같은 receipt를 다시 확인한다.
+policy ID/version/hash, 승인자, corpus/compiler binding과 non-revoked receipt를 저장한다. Policy는
+각 metric에 `metric_kind`(`length_um`, `area_um2`, `count`, `binary`), 비교 방식, absolute/relative
+tolerance, weight와 hard-fail 여부를 따로 지정한다. Binary는 exact 비교만 허용하며 policy는 corpus에
+있는 모든 metric을 빠짐없이 다뤄야 한다. Hard-fail metric 하나라도 기준을 벗어나면 평균점수와
+무관하게 실패한다. Candidate build 시 authority receipt를 다시 확인하고 per-DUT weighted score와
+각 metric 판정을 policy로 재계산한다.
 
 원본 corpus GDS 자체를
 reproduced output으로 제출하면 candidate evidence로 인정하지 않는다. 원본과 SHA가 다른 결과는

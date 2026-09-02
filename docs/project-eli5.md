@@ -196,7 +196,9 @@ Skill이 없어도 MCP 서버는 실행된다. 다른 컴퓨터에서는 저장�
 - Reference GDS에서 보이는 drawing style을 정리한다.
 - 실제 Pad macro를 수정하지 않고 별도 top cell에 배치한다.
 - 여러 labeled DUT를 등록하고 누락 정보와 설명되지 않은 차이를 찾는다.
+- 겉보기에는 조합이 충분해도 L과 CPP가 거의 같이 움직여 규칙을 안정적으로 배울 수 없으면 알려준다.
 - 재현 DUT를 train/검사용 그룹으로 나눠 비교하고 공정별 adapter 후보를 저장한다.
+- 길이, 면적, 도형 개수와 존재 여부에 각각 맞는 합격 기준을 적용한다.
 - Direct Phase 1의 계산 경로를 여러 rail과 cross-tie가 있는 mesh로 바꾼다.
 - 제한된 PCell split batch를 만든다.
 - 작업 상태와 입력 근거를 파일로 남긴다.
