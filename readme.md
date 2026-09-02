@@ -302,6 +302,7 @@ compileall passed
 
 ## 문서
 
+- [비전문가를 위한 프로젝트 설명](docs/project-eli5.md)
 - [타깃 공정 온보딩 절차](onboarding.md)
 - [보존된 최종 예제와 용도](examples/README.md)
 - [실행 가능성과 한계를 구분한 사용자 시나리오](scenario.md)
