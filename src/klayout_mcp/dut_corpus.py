@@ -183,6 +183,42 @@ def _validate_inputs(
                 details={"field": f"{field}.terminals", "dut_id": dut_id, "invalid_terminals": invalid_terminals},
                 next_action="Map every terminal to an explicit semantic layer_role.",
             )
+        invalid_landing_boxes = []
+        for terminal_name, definition in terminals.items():
+            landing = definition.get("landing_bbox_um")
+            if landing is None:
+                continue
+            if (
+                not isinstance(landing, (list, tuple))
+                or len(landing) != 4
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    for value in landing
+                )
+                or (
+                    isinstance(landing, (list, tuple))
+                    and len(landing) == 4
+                    and not (
+                        float(landing[0]) < float(landing[2])
+                        and float(landing[1]) < float(landing[3])
+                    )
+                )
+            ):
+                invalid_landing_boxes.append(str(terminal_name))
+        if invalid_landing_boxes:
+            _fail(
+                "DUT_TERMINAL_LANDING_BBOX_INVALID",
+                "A terminal landing_bbox_um must be four finite ordered coordinates.",
+                details={
+                    "field": f"{field}.terminals",
+                    "dut_id": dut_id,
+                    "invalid_terminals": sorted(invalid_landing_boxes),
+                    "expected": "[x1, y1, x2, y2] with x1 < x2 and y1 < y2",
+                },
+                next_action="Correct the listed terminal landing boxes, or omit them to continue with a non-blocking unobserved-landing warning.",
+            )
         record_topology = record.get("topology")
         if not isinstance(record_topology, str) or record_topology.strip() != normalized_topology:
             _fail(
@@ -204,7 +240,22 @@ def _validate_inputs(
                     )
                     for name in schema
                 },
-                "terminals": immutable_json_copy(terminals),
+                "terminals": {
+                    name: {
+                        **immutable_json_copy(definition),
+                        **(
+                            {
+                                "landing_bbox_um": [
+                                    float(value)
+                                    for value in definition["landing_bbox_um"]
+                                ]
+                            }
+                            if definition.get("landing_bbox_um") is not None
+                            else {}
+                        ),
+                    }
+                    for name, definition in sorted(terminals.items())
+                },
                 "topology": normalized_topology,
             }
         )
@@ -252,15 +303,58 @@ def _validate_inputs(
     return schema, normalized, roles
 
 
-def _flatten_metrics(observation: Mapping[str, Any]) -> dict[str, float]:
+def _flatten_metrics(observation: Mapping[str, Any]) -> dict[str, Any]:
     flattened = {}
     for role, metrics in sorted(observation["layer_metrics"].items()):
         if not metrics.get("present"):
             flattened[f"{role}.present"] = 0.0
             continue
         flattened[f"{role}.present"] = 1.0
-        for name in ("polygon_count", "width_um", "height_um", "area_um2"):
-            flattened[f"{role}.{name}"] = float(metrics[name])
+        for name in (
+            "polygon_count",
+            "hole_count",
+            "width_um",
+            "height_um",
+            "area_um2",
+        ):
+            flattened[f"{role}.{name}"] = float(
+                metrics.get(name, 0) if name == "hole_count" else metrics[name]
+            )
+        layer_fingerprint = metrics.get("geometry_fingerprint_sha256")
+        if isinstance(layer_fingerprint, str):
+            flattened[f"{role}.geometry_fingerprint_sha256"] = layer_fingerprint
+    for terminal_name, metrics in sorted(
+        observation.get("terminal_metrics", {}).items()
+    ):
+        prefix = f"terminal.{terminal_name}"
+        flattened[f"{prefix}.landing_declared"] = float(
+            metrics.get("landing_declared") is True
+        )
+        if metrics.get("landing_declared") is not True:
+            continue
+        flattened[f"{prefix}.landing_present"] = float(
+            metrics.get("landing_present") is True
+        )
+        for name in (
+            "landing_overlap_area_um2",
+            "touched_component_count",
+            "touched_component_area_um2",
+        ):
+            flattened[f"{prefix}.{name}"] = float(metrics.get(name, 0.0))
+        component_fingerprint = metrics.get(
+            "touched_component_fingerprint_sha256"
+        )
+        if isinstance(component_fingerprint, str):
+            flattened[
+                f"{prefix}.touched_component_fingerprint_sha256"
+            ] = component_fingerprint
+    for pair_name, metrics in sorted(
+        observation.get("terminal_pair_metrics", {}).items()
+    ):
+        if metrics.get("status") == "observed":
+            flattened[f"terminal_pair.{pair_name}.same_component"] = float(
+                metrics.get("same_component") is True
+            )
     return flattened
 
 
@@ -860,7 +954,14 @@ def onboard_dut_corpus(
             {
                 "operation": "inspect_dut_corpus",
                 "layout_path": str(snapshot.path),
-                "dut_records": [{"dut_id": record["dut_id"], "cell_name": record["cell_name"]} for record in records],
+                "dut_records": [
+                    {
+                        "dut_id": record["dut_id"],
+                        "cell_name": record["cell_name"],
+                        "terminals": record["terminals"],
+                    }
+                    for record in records
+                ],
                 "layer_roles": roles,
             },
             executable_path=klayout_executable,
@@ -926,11 +1027,93 @@ def onboard_dut_corpus(
                 compiler_model_spec=normalized_model_spec,
             )
         )
+        terminal_contract_count = sum(
+            len(record["terminals"]) for record in enriched
+        )
+        terminal_landing_declared = [
+            (record["dut_id"], terminal_name)
+            for record in enriched
+            for terminal_name, definition in record["terminals"].items()
+            if definition.get("landing_bbox_um") is not None
+        ]
+        terminal_landing_observed = [
+            (record["dut_id"], terminal_name)
+            for record in enriched
+            for terminal_name, metrics in record.get("terminal_metrics", {}).items()
+            if metrics.get("landing_present") is True
+        ]
+        terminal_warnings: list[ActionableIssue] = []
+        undeclared_count = terminal_contract_count - len(terminal_landing_declared)
+        if undeclared_count:
+            terminal_warnings.append(
+                ActionableIssue(
+                    code="DUT_TERMINAL_LANDING_NOT_DECLARED",
+                    category="coverage_or_identifiability",
+                    severity="warning",
+                    stage="corpus_onboarding",
+                    message=f"{undeclared_count} terminal landing box(es) were not declared, so their physical landing cannot be compared.",
+                    field_path="/dut_records/*/terminals/*/landing_bbox_um",
+                    received={
+                        "terminal_contract_count": terminal_contract_count,
+                        "landing_bbox_declared_count": len(terminal_landing_declared),
+                        "terminals_without_landing_bbox": [
+                            {
+                                "dut_id": record["dut_id"],
+                                "terminal": terminal_name,
+                            }
+                            for record in enriched
+                            for terminal_name, definition in record[
+                                "terminals"
+                            ].items()
+                            if definition.get("landing_bbox_um") is None
+                        ],
+                    },
+                    expected={
+                        "optional_observation_contract": "landing_bbox_um=[x1,y1,x2,y2]"
+                    },
+                    reason="A layer role alone identifies a semantic layer but not the intended physical terminal landing.",
+                    fix="Continue for geometry exploration, or add landing_bbox_um for terminals that must be compared physically.",
+                )
+            )
+        unresolved_declared = len(terminal_landing_declared) - len(
+            terminal_landing_observed
+        )
+        if unresolved_declared:
+            terminal_warnings.append(
+                ActionableIssue(
+                    code="DUT_TERMINAL_LANDING_NOT_OBSERVED",
+                    category="coverage_or_identifiability",
+                    severity="warning",
+                    stage="corpus_onboarding",
+                    message=f"{unresolved_declared} declared terminal landing box(es) did not overlap an observed same-layer component.",
+                    field_path="/dut_records/*/terminals/*/landing_bbox_um",
+                    received={
+                        "landing_bbox_declared_count": len(terminal_landing_declared),
+                        "landing_observed_count": len(terminal_landing_observed),
+                        "unobserved_terminals": [
+                            {"dut_id": dut_id, "terminal": terminal_name}
+                            for dut_id, terminal_name in terminal_landing_declared
+                            if (dut_id, terminal_name)
+                            not in set(terminal_landing_observed)
+                        ],
+                    },
+                    expected={"positive_area_overlap": True},
+                    reason="The declared landing may be misplaced, off-grid after quantization, or mapped to the wrong layer role.",
+                    fix="Inspect the reported DUT/terminal landing boxes and correct the box or layer role; this remains a warning until an approved policy makes it a hard fail.",
+                )
+            )
         all_metric_names = sorted(set.intersection(*(set(record["flat_metrics"]) for record in training)))
         invariants = []
         for metric in all_metric_names:
             values = [record["flat_metrics"][metric] for record in training]
-            if max(values) - min(values) <= 1e-12:
+            if all(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                for value in values
+            ):
+                invariant = max(values) - min(values) <= 1e-12
+            else:
+                invariant = all(value == values[0] for value in values[1:])
+            if invariant:
                 invariants.append({"metric": metric, "value": values[0], "supporting_dut_ids": [record["dut_id"] for record in training]})
         partition = {
             "train_dut_ids": [record["dut_id"] for record in training],
@@ -957,6 +1140,14 @@ def onboard_dut_corpus(
             "dut_records": enriched,
             "coverage_matrix": _coverage(schema, enriched),
             "identifiability_evidence": identifiability_evidence,
+            "terminal_observation_summary": {
+                "terminal_contract_count": terminal_contract_count,
+                "landing_bbox_declared_count": len(terminal_landing_declared),
+                "landing_observed_count": len(terminal_landing_observed),
+                "same_layer_component_analysis": True,
+                "cross_layer_connectivity_verified": False,
+                "lvs_equivalence_claimed": False,
+            },
             "partition": partition,
             "drawing_style_profile": {
                 "invariant_metrics": invariants,
@@ -988,15 +1179,19 @@ def onboard_dut_corpus(
                 shutil.rmtree(staging)
     clarification = ValidationReport.build(
         summary=(
-            f"corpus onboarding에서 blocker {len(identifiability_issues)}건, warning {len(identifiability_warnings)}건과 사용자 결정 {len(questions)}건이 남았습니다."
+            f"corpus onboarding에서 blocker {len(identifiability_issues)}건, warning {len(identifiability_warnings) + len(terminal_warnings)}건과 사용자 결정 {len(questions)}건이 남았습니다."
             if questions or identifiability_issues
             else (
-                f"corpus onboarding이 완료되었으며 warning {len(identifiability_warnings)}건이 있습니다."
-                if identifiability_warnings
+                f"corpus onboarding이 완료되었으며 warning {len(identifiability_warnings) + len(terminal_warnings)}건이 있습니다."
+                if identifiability_warnings or terminal_warnings
                 else "corpus onboarding이 완료되었으며 unresolved geometry variation이 없습니다."
             )
         ),
-        issues=(*identifiability_issues, *identifiability_warnings),
+        issues=(
+            *identifiability_issues,
+            *identifiability_warnings,
+            *terminal_warnings,
+        ),
         questions=tuple(questions),
         next_action=(
             "Add missing parameter coverage and resolve every drawing-precedent question before fitting."
@@ -1540,23 +1735,41 @@ def _validate_scorecard_evidence(
                 candidate_value = result.get("candidate")
                 score = result.get("score")
                 absolute_delta = result.get("absolute_delta")
+                digest_metric = rule["metric_kind"] == "digest"
+                if digest_metric:
+                    candidate_invalid = (
+                        not isinstance(candidate_value, str)
+                        or not SHA256_PATTERN.fullmatch(candidate_value)
+                    )
+                    delta_invalid = absolute_delta is not None
+                else:
+                    candidate_invalid = (
+                        isinstance(candidate_value, bool)
+                        or not isinstance(candidate_value, (int, float))
+                        or not math.isfinite(float(candidate_value))
+                    )
+                    delta_invalid = (
+                        isinstance(absolute_delta, bool)
+                        or not isinstance(absolute_delta, (int, float))
+                        or not math.isfinite(float(absolute_delta))
+                    )
                 if (
-                    isinstance(candidate_value, bool)
-                    or not isinstance(candidate_value, (int, float))
-                    or not math.isfinite(float(candidate_value))
+                    candidate_invalid
                     or isinstance(score, bool)
                     or not isinstance(score, (int, float))
                     or not math.isfinite(float(score))
-                    or isinstance(absolute_delta, bool)
-                    or not isinstance(absolute_delta, (int, float))
-                    or not math.isfinite(float(absolute_delta))
+                    or delta_invalid
                 ):
                     invalid_metric_results.append(metric)
                     continue
                 if rule["comparison"] == "exact":
                     expected_passed = candidate_value == reference_value
                     expected_score = 1.0 if expected_passed else 0.0
-                    expected_delta = abs(float(candidate_value) - float(reference_value))
+                    expected_delta = (
+                        None
+                        if digest_metric
+                        else abs(float(candidate_value) - float(reference_value))
+                    )
                 else:
                     expected_score, expected_delta, expected_passed = _metric_similarity(
                         float(reference_value),
@@ -1578,11 +1791,15 @@ def _validate_scorecard_evidence(
                 if (
                     any(result.get(name) != value for name, value in expected_fields.items())
                     or not math.isclose(float(score), expected_score, rel_tol=0.0, abs_tol=1e-12)
-                    or not math.isclose(
-                        float(absolute_delta),
-                        expected_delta,
-                        rel_tol=0.0,
-                        abs_tol=1e-12,
+                    or (
+                        absolute_delta != expected_delta
+                        if digest_metric
+                        else not math.isclose(
+                            float(absolute_delta),
+                            float(expected_delta),
+                            rel_tol=0.0,
+                            abs_tol=1e-12,
+                        )
                     )
                 ):
                     invalid_metric_results.append(metric)
@@ -1770,12 +1987,14 @@ def _diagnostic_metric_rule(
 ) -> dict[str, Any]:
     """Expand the legacy caller policy into explicit, non-qualifying metric rules."""
 
+    metric_kind = qualification_metric_kind(metric)
+    exact = metric_kind == "digest"
     return {
         "metric": metric,
-        "metric_kind": qualification_metric_kind(metric),
-        "comparison": "numeric_tolerance",
-        "absolute_tolerance": absolute_tolerance,
-        "relative_tolerance": relative_tolerance,
+        "metric_kind": metric_kind,
+        "comparison": "exact" if exact else "numeric_tolerance",
+        "absolute_tolerance": 0.0 if exact else absolute_tolerance,
+        "relative_tolerance": 0.0 if exact else relative_tolerance,
         "weight": 1.0,
         "hard_fail": False,
     }
@@ -1927,7 +2146,11 @@ def score_reproduced_corpus(
                 "operation": "inspect_dut_corpus",
                 "layout_path": str(snapshot.path),
                 "dut_records": [
-                    {"dut_id": dut_id, "cell_name": reproduced_cell_by_dut_id[dut_id]}
+                    {
+                        "dut_id": dut_id,
+                        "cell_name": reproduced_cell_by_dut_id[dut_id],
+                        "terminals": reference_by_id[dut_id]["terminals"],
+                    }
                     for dut_id in sorted(reference_by_id)
                 ],
                 "layer_roles": corpus["layer_roles"],
@@ -2014,12 +2237,16 @@ def score_reproduced_corpus(
                     })
                     continue
                 if rule["comparison"] == "exact":
-                    delta = abs(
-                        float(candidate_metrics[metric])
-                        - float(reference_metrics[metric])
-                    )
                     passed = candidate_metrics[metric] == reference_metrics[metric]
                     score = 1.0 if passed else 0.0
+                    delta = (
+                        None
+                        if rule["metric_kind"] == "digest"
+                        else abs(
+                            float(candidate_metrics[metric])
+                            - float(reference_metrics[metric])
+                        )
+                    )
                 else:
                     score, delta, passed = _metric_similarity(
                         float(reference_metrics[metric]),

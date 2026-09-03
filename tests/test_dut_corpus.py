@@ -70,7 +70,7 @@ class TrustedQualificationAuthority:
         metric_rules = []
         for metric in available_metrics:
             metric_kind = qualification_metric_kind(metric)
-            exact = metric_kind in {"binary", "count"}
+            exact = metric_kind in {"binary", "count", "digest"}
             rule = {
                 "metric": metric,
                 "metric_kind": metric_kind,
@@ -703,6 +703,129 @@ def test_qualification_policy_applies_typed_per_metric_rules(tmp_path: Path) -> 
     ] == "length_um"
 
 
+def test_terminal_component_digest_can_be_a_policy_hard_fail_without_global_fingerprint(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "terminal-source.gds"
+    source.write_bytes(b"terminal corpus")
+    reproduced = tmp_path / "terminal-output.gds"
+    reproduced.write_bytes(b"terminal compiler output")
+    records = [
+        {
+            "dut_id": f"D{index}",
+            "cell_name": f"DUT_{length}",
+            "parameters": {"gate_length_nm": length},
+            "terminals": {
+                "G": {
+                    "layer_role": "active",
+                    "landing_bbox_um": [0.1, 0.1, 0.2, 0.2],
+                }
+            },
+            "topology": "nmos-core",
+        }
+        for index, length in enumerate((50, 100, 150), start=1)
+    ]
+
+    def worker(global_fingerprint, component_fingerprint):
+        def run(request, **kwargs):
+            observations = []
+            for record in request["dut_records"]:
+                assert record["terminals"]["G"]["landing_bbox_um"] == [
+                    0.1,
+                    0.1,
+                    0.2,
+                    0.2,
+                ]
+                observations.append(
+                    {
+                        "dut_id": record["dut_id"],
+                        "cell_name": record["cell_name"],
+                        "geometry_fingerprint_sha256": global_fingerprint * 64,
+                        "bbox_um": [0, 0, 1, 1],
+                        "layer_metrics": {
+                            "active": {
+                                "present": True,
+                                "polygon_count": 1,
+                                "hole_count": 0,
+                                "width_um": 1.0,
+                                "height_um": 1.0,
+                                "area_um2": 1.0,
+                                "bbox_um": [0, 0, 1, 1],
+                                "geometry_fingerprint_sha256": "a" * 64,
+                            }
+                        },
+                        "terminal_metrics": {
+                            "G": {
+                                "landing_declared": True,
+                                "landing_present": True,
+                                "landing_overlap_area_um2": 0.01,
+                                "touched_component_count": 1,
+                                "touched_component_area_um2": 1.0,
+                                "touched_component_fingerprint_sha256": (
+                                    component_fingerprint * 64
+                                ),
+                            }
+                        },
+                        "terminal_pair_metrics": {},
+                    }
+                )
+            return {
+                "ok": True,
+                "dbu_um": 0.001,
+                "layout_cell_count": len(observations),
+                "observations": observations,
+            }
+
+        return run
+
+    corpus = onboard_dut_corpus(
+        source_layout_path=str(source),
+        technology_identity={"technology": "tech-a", "pdk_revision": "r7"},
+        device_family="finfet",
+        topology="nmos-core",
+        parameter_schema={
+            "gate_length_nm": {"unit": "nm", "kind": "continuous"}
+        },
+        compiler_model_spec=_main_effect_model_spec("gate_length_nm"),
+        dut_records=records,
+        layer_roles={"active": {"layer": 2, "datatype": 0}},
+        validation_dut_ids=["D3"],
+        package_root=tmp_path / "terminal-corpora",
+        worker_runner=worker("1", "b"),
+    )
+    metric = "terminal.G.touched_component_fingerprint_sha256"
+    score = score_reproduced_corpus(
+        corpus_package_path=corpus["package_path"],
+        reproduced_layout_path=str(reproduced),
+        reproduced_cell_by_dut_id={"D1": "R1", "D2": "R2", "D3": "R3"},
+        scoring_policy={
+            "absolute_tolerance": 0,
+            "relative_tolerance": 0,
+            "minimum_aggregate_score": 0,
+            "exact_fingerprint_required": False,
+        },
+        scorecard_root=tmp_path / "terminal-scores",
+        compiler_identity=_compiler_identity(corpus),
+        qualification_policy_authority=TrustedQualificationAuthority(
+            minimum_aggregate_score=0.01,
+            exact_fingerprint_required=False,
+            required_metrics=(metric,),
+        ),
+        worker_runner=worker("2", "c"),
+    )
+
+    assert score["scorecard"]["qualification_policy"][
+        "exact_fingerprint_required"
+    ] is False
+    for result in score["scorecard"]["per_dut"]:
+        metrics = {item["metric"]: item for item in result["metrics"]}
+        assert metrics[metric]["metric_kind"] == "digest"
+        assert metrics[metric]["comparison"] == "exact"
+        assert metrics[metric]["status"] == "failed"
+        assert metrics[metric]["hard_fail"] is True
+        assert f"POLICY_METRIC_FAILED:{metric}" in result["hard_fail_reasons"]
+
+
 def test_collinear_doe_blockers_are_persisted_and_block_downstream_use(
     tmp_path: Path,
 ) -> None:
@@ -955,7 +1078,19 @@ def test_identifiability_uses_declared_interaction_basis_not_oat_heuristic(
     assert {
         issue["code"]
         for issue in nearly_collinear["clarification_request"]["issues"]
-    } == {"DUT_COMPILER_BASIS_NUMERICAL_STABILITY_WARNING"}
+    } == {
+        "DUT_COMPILER_BASIS_NUMERICAL_STABILITY_WARNING",
+        "DUT_TERMINAL_LANDING_NOT_DECLARED",
+    }
+    terminal_warning = next(
+        issue
+        for issue in nearly_collinear["clarification_request"]["issues"]
+        if issue["code"] == "DUT_TERMINAL_LANDING_NOT_DECLARED"
+    )
+    assert terminal_warning["received"]["terminals_without_landing_bbox"][0] == {
+        "dut_id": "D1",
+        "terminal": "G",
+    }
 
 
 @pytest.mark.parametrize(
@@ -975,6 +1110,23 @@ def test_identifiability_uses_declared_interaction_basis_not_oat_heuristic(
             [{**record, "terminals": {"G": {}}} for record in _records()],
             "nmos-core",
             "DUT_TERMINAL_MAPPING_INVALID",
+        ),
+        (
+            {"gate_length_nm": {"unit": "nm", "kind": "continuous"}},
+            [
+                {
+                    **record,
+                    "terminals": {
+                        "G": {
+                            "layer_role": "gate",
+                            "landing_bbox_um": [0.2, 0.1, 0.1, 0.2],
+                        }
+                    },
+                }
+                for record in _records()
+            ],
+            "nmos-core",
+            "DUT_TERMINAL_LANDING_BBOX_INVALID",
         ),
         (
             {"gate_length_nm": {"unit": "nm", "kind": "continuous"}},
@@ -1002,3 +1154,7 @@ def test_corpus_declared_kinds_terminals_and_topology_fail_closed(
         )
 
     assert caught.value.code == expected_code
+    if expected_code == "DUT_TERMINAL_LANDING_BBOX_INVALID":
+        assert caught.value.details["dut_id"] == "D1"
+        assert caught.value.details["invalid_terminals"] == ["G"]
+        assert "[x1, y1, x2, y2]" in caught.value.details["expected"]

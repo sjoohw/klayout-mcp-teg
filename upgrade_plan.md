@@ -409,7 +409,9 @@ example layout + DUT parameter manifest
    missing/duplicate/unknown ID와 필요한 parameter column을 사용자가 바로 수정할 수 있는 template과 함께
    반환한다.
 2. 모든 DUT occurrence를 공통 orientation/anchor로 normalize하고 layer/role별 recursive geometry,
-   hierarchy, terminal anchor와 parameter row를 `DutCorpusArtifact`로 hash한다. Source는 수정하지 않는다.
+   hierarchy, polygon outer/hole ring, terminal anchor와 parameter row를 `DutCorpusArtifact`로 hash한다.
+   선택적 `landing_bbox_um`이 있으면 해당 terminal이 닿은 same-layer merged component fingerprint와
+   terminal pair의 same-component 여부도 관측한다. Source는 수정하지 않는다.
 3. Exact process/PDK, layermap, DBU/grid, device family, topology regime와 `active_when`으로 corpus를
    먼저 partition한다. 다른 regime의 DUT를 한 dependency/style vote에 섞지 않는다.
 4. 동일 source cell/geometry hash의 반복 instance는 기본적으로 한 evidence vote로 deduplicate한다.
@@ -589,6 +591,10 @@ Upgrade checkpoint 진행:
   trusted qualification-policy authority, 승인자/receipt와 metric별 kind/tolerance/weight/hard-fail을
   요구한다. Candidate build 시 exact policy/corpus/compiler binding, current non-revoked receipt와
   per-DUT weighted metric 판정을 재검증한다.
+- [x] Exact geometry fingerprint에 polygon hole ring을 포함하고 layer별 digest를 저장한다. 선택적 terminal
+  landing box로 landing 존재, touched same-layer component digest/면적/개수와 terminal-pair same-component를
+  metric화했다. 미선언·미관측 landing은 warning이며, 승인 policy가 필요한 metric만 hard-fail로 선택한다.
+  이 관측을 cross-layer connectivity나 LVS 증거로 승격하지 않는다.
 - [ ] Corpus로부터 CPP 연계 Poly/Active/contact/implant/terminal dependency recipe를 자동 합성하는
   process-specific compiler는 만들지 않았다. 실제 labeled corpus, topology 규칙과 foundry 검증 없이는
   한 GDS에서 이를 추론하지 않으며 candidate score를 PCell/electrical/foundry 동등성으로 승격하지 않는다.

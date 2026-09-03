@@ -32,13 +32,15 @@ METRIC_RULE_FIELDS = frozenset(
 def qualification_metric_kind(metric: str) -> str | None:
     """Return the physical/numeric kind encoded by a flattened corpus metric."""
 
-    if metric.endswith(".present"):
+    if metric.endswith((".geometry_fingerprint_sha256", ".touched_component_fingerprint_sha256")):
+        return "digest"
+    if metric.endswith((".present", ".landing_declared", ".landing_present", ".same_component")):
         return "binary"
-    if metric.endswith(".polygon_count"):
+    if metric.endswith((".polygon_count", ".hole_count", ".touched_component_count")):
         return "count"
-    if metric.endswith((".width_um", ".height_um")):
+    if metric.endswith((".width_um", ".height_um", ".perimeter_um")):
         return "length_um"
-    if metric.endswith(".area_um2"):
+    if metric.endswith("area_um2"):
         return "area_um2"
     return None
 
@@ -175,8 +177,8 @@ def _validate_policy_document(
                 )
             ):
                 reasons.append("exact_comparison_requires_zero_tolerance")
-            if expected_kind == "binary" and rule.get("comparison") != "exact":
-                reasons.append("binary_metric_requires_exact_comparison")
+            if expected_kind in {"binary", "digest"} and rule.get("comparison") != "exact":
+                reasons.append(f"{expected_kind}_metric_requires_exact_comparison")
             if reasons:
                 invalid_rules.append(
                     {

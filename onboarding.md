@@ -216,7 +216,9 @@ onboard_transistor_corpus
 
 `parameter_schema`에는 Gate length, CPP, planar width, nFin, cell height와 필요한 추가 축을 이름/단위/
 numeric kind로 등록한다. 각 `dut_record`는 exact cell name, 모든 parameter 값, topology와 terminal
-landing/layer mapping을 가져야 한다. `compiler_model_spec`에는 intended compiler의 main effect,
+layer mapping을 가져야 한다. 물리 landing도 비교하려면 terminal마다 cell-local
+`landing_bbox_um=[x1,y1,x2,y2]`를 추가한다. 형식 오류는 DUT/terminal과 수정법을 명시해 거부하지만,
+landing 생략이나 도형 미겹침은 onboarding을 막지 않고 warning으로 보고한다. `compiler_model_spec`에는 intended compiler의 main effect,
 interaction, 숫자 category와 threshold/regime basis를 명시한다. 최소 한 DUT는 validation group으로
 분리하지만 같은 source에 보이므로 현재 구현을 sealed holdout이라고 부르지 않는다.
 
@@ -244,6 +246,9 @@ Reproduced GDS의 caller-selected score는 진단용이다. Candidate를 만들�
 `qualification_policy_authority`가 설치돼야 하며, 그 authority가 고정한 필수 metric은 평균점수와
 무관한 hard fail이다. Policy ID/version/hash, 승인자와 non-revoked receipt를 candidate build 시 다시
 검증한다. 통과해도 candidate 상태는 `candidate_scored_logical_validation_not_foundry_qualified`다.
+Fingerprint는 polygon hole을 포함한다. Layer와 terminal이 닿은 same-layer component의 digest 및
+terminal-pair same-component 결과도 조직 policy에서 개별 hard-fail metric으로 선택할 수 있다. 이
+관측은 cross-layer via connectivity나 LVS를 대신하지 않는다.
 
 현재 경로는 CPP가 바뀔 때 Gate/Active/Contact/implant/terminal을 함께 움직이는 dependency recipe나
 callable PCell을 자동 생성하지 않는다. 실제 compiler identity/code hash는 candidate에 결속되지만,

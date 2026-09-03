@@ -11,9 +11,112 @@ import pya
 from .worker_protocol import worker_error
 
 
-def _fingerprint_and_metrics(cell, layers, dbu):
+def _canonical_ring(points):
+    ring = [(int(point.x), int(point.y)) for point in points]
+    if len(ring) > 1 and ring[0] == ring[-1]:
+        ring.pop()
+    if not ring:
+        return []
+    candidates = []
+    for sequence in (ring, list(reversed(ring))):
+        candidates.extend(
+            sequence[index:] + sequence[:index] for index in range(len(sequence))
+        )
+    return [list(point) for point in min(candidates)]
+
+
+def _polygon_payload(polygon):
+    return {
+        "hull_dbu": _canonical_ring(polygon.each_point_hull()),
+        "holes_dbu": sorted(
+            _canonical_ring(polygon.each_point_hole(index))
+            for index in range(polygon.holes())
+        ),
+    }
+
+
+def _digest(payload):
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _terminal_observations(terminals, components_by_role, dbu):
+    observations = {}
+    touched_by_terminal = {}
+    for terminal_name, definition in sorted(terminals.items()):
+        role = definition.get("layer_role")
+        landing = definition.get("landing_bbox_um")
+        observation = {
+            "layer_role": role,
+            "landing_declared": isinstance(landing, list) and len(landing) == 4,
+            "connectivity_scope": "same_layer_merged_polygon_component_not_lvs",
+        }
+        touched = set()
+        if observation["landing_declared"]:
+            landing_dbu = [int(round(float(value) / dbu)) for value in landing]
+            landing_box = pya.Box(*landing_dbu)
+            landing_region = pya.Region(landing_box)
+            overlap_area = 0
+            touched_payloads = []
+            touched_area = 0
+            for component_index, (polygon, payload) in enumerate(
+                components_by_role.get(role, [])
+            ):
+                intersection_area = (pya.Region(polygon) & landing_region).area()
+                if intersection_area <= 0:
+                    continue
+                touched.add(component_index)
+                overlap_area += intersection_area
+                touched_area += polygon.area()
+                touched_payloads.append(payload)
+            observation.update(
+                {
+                    "landing_bbox_um": [float(value) for value in landing],
+                    "quantized_landing_bbox_um": [value * dbu for value in landing_dbu],
+                    "landing_present": bool(touched),
+                    "landing_overlap_area_um2": overlap_area * dbu * dbu,
+                    "touched_component_count": len(touched),
+                    "touched_component_area_um2": touched_area * dbu * dbu,
+                    "touched_component_fingerprint_sha256": (
+                        _digest(sorted(touched_payloads, key=lambda item: json.dumps(item, sort_keys=True)))
+                        if touched_payloads
+                        else None
+                    ),
+                }
+            )
+        observations[terminal_name] = observation
+        touched_by_terminal[terminal_name] = (role, touched)
+
+    pair_observations = {}
+    names = sorted(observations)
+    for left_index, left in enumerate(names):
+        left_role, left_components = touched_by_terminal[left]
+        for right in names[left_index + 1 :]:
+            right_role, right_components = touched_by_terminal[right]
+            pair_id = f"{left}__{right}"
+            if left_role != right_role:
+                pair_observations[pair_id] = {
+                    "status": "unverified_cross_layer",
+                    "same_component": None,
+                }
+                continue
+            observable = bool(left_components) and bool(right_components)
+            pair_observations[pair_id] = {
+                "status": "observed" if observable else "unresolved_landing",
+                "same_component": (
+                    bool(left_components.intersection(right_components))
+                    if observable
+                    else None
+                ),
+            }
+    return observations, pair_observations
+
+
+def _fingerprint_and_metrics(cell, layers, terminals, dbu):
     payload = []
     metrics = {}
+    components_by_role = {}
     for role, layer in sorted(layers.items()):
         index = cell.layout().find_layer(int(layer["layer"]), int(layer["datatype"]))
         if index is None:
@@ -21,18 +124,26 @@ def _fingerprint_and_metrics(cell, layers, dbu):
             continue
         region = pya.Region(cell.begin_shapes_rec(index)).merged()
         polygons = []
+        components = []
         area = 0
+        hole_count = 0
         for polygon in region.each():
-            points = [[point.x, point.y] for point in polygon.each_point_hull()]
-            polygons.append(points)
+            polygon_record = _polygon_payload(polygon)
+            polygons.append(polygon_record)
+            components.append((polygon, polygon_record))
             area += polygon.area()
+            hole_count += polygon.holes()
         if not polygons:
             metrics[role] = {"present": False}
             continue
+        polygons.sort(key=lambda item: json.dumps(item, sort_keys=True))
+        components_by_role[role] = components
         bbox = region.bbox()
+        layer_fingerprint = _digest(polygons)
         metrics[role] = {
             "present": True,
             "polygon_count": len(polygons),
+            "hole_count": hole_count,
             "bbox_um": [
                 bbox.left * dbu,
                 bbox.bottom * dbu,
@@ -42,6 +153,7 @@ def _fingerprint_and_metrics(cell, layers, dbu):
             "width_um": bbox.width() * dbu,
             "height_um": bbox.height() * dbu,
             "area_um2": area * dbu * dbu,
+            "geometry_fingerprint_sha256": layer_fingerprint,
         }
         payload.append(
             {
@@ -51,10 +163,10 @@ def _fingerprint_and_metrics(cell, layers, dbu):
                 "polygons_dbu": polygons,
             }
         )
-    digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    return digest, metrics
+    terminal_metrics, terminal_pair_metrics = _terminal_observations(
+        terminals, components_by_role, dbu
+    )
+    return _digest(payload), metrics, terminal_metrics, terminal_pair_metrics
 
 
 def inspect_dut_corpus(request):
@@ -85,7 +197,14 @@ def inspect_dut_corpus(request):
                 },
                 "Correct the DUT cell name using the layout inventory.",
             )
-        fingerprint, metrics = _fingerprint_and_metrics(cell, layers, float(layout.dbu))
+        fingerprint, metrics, terminal_metrics, terminal_pair_metrics = (
+            _fingerprint_and_metrics(
+                cell,
+                layers,
+                record.get("terminals", {}),
+                float(layout.dbu),
+            )
+        )
         bbox = cell.bbox()
         observations.append(
             {
@@ -99,6 +218,10 @@ def inspect_dut_corpus(request):
                     bbox.top * layout.dbu,
                 ],
                 "layer_metrics": metrics,
+                "terminal_metrics": terminal_metrics,
+                "terminal_pair_metrics": terminal_pair_metrics,
+                "terminal_connectivity_verified": False,
+                "terminal_connectivity_scope": "same_layer_merged_polygon_component_only_not_lvs",
             }
         )
     return {

@@ -223,7 +223,11 @@ Parameter schema에는 Gate length, CPP, planar width, nFin과 cell height 같�
 fitting 계산에서 제외하지만 같은 source GDS와 metadata에 남는다. 따라서 현재 경계는 sealed holdout이
 아닌 logical partition이다.
 `kind=integer` 값은 실제 정수여야 한다. 각 terminal은 존재하는 semantic `layer_role`을 명시하고,
-각 DUT의 topology는 corpus topology와 정확히 같아야 한다.
+각 DUT의 topology는 corpus topology와 정확히 같아야 한다. Terminal의 물리 위치까지 비교하려면
+cell-local 좌표의 `landing_bbox_um=[x1,y1,x2,y2]`를 선택적으로 준다. 좌표 형식이나 순서가 틀리면 정확한 DUT/terminal과
+기대 형식을 알려주며 입력을 거부한다. 좌표를 생략하거나 선언한 box가 해당 layer 도형과 겹치지 않으면
+onboarding은 막지 않고 `DUT_TERMINAL_LANDING_NOT_DECLARED` 또는
+`DUT_TERMINAL_LANDING_NOT_OBSERVED` warning을 반환한다.
 
 `compiler_model_spec`에는 실제 compiler가 사용하는 basis를 명시한다. 지원 항목은 intercept,
 parameter main effect, 여러 parameter interaction, 숫자 category indicator와 threshold-based regime다.
@@ -246,11 +250,17 @@ Score는 reproduced train/validation cell을 실제로 다시 읽어 비교한�
 `scoring_policy`는 진단용이다. Stock처럼 host `qualification_policy_authority`가 없으면 scorecard를
 만들 수는 있지만 adapter candidate에는 사용할 수 없다. Candidate용 score는 host authority가 발행한
 policy ID/version/hash, 승인자, corpus/compiler binding과 non-revoked receipt를 저장한다. Policy는
-각 metric에 `metric_kind`(`length_um`, `area_um2`, `count`, `binary`), 비교 방식, absolute/relative
-tolerance, weight와 hard-fail 여부를 따로 지정한다. Binary는 exact 비교만 허용하며 policy는 corpus에
+각 metric에 `metric_kind`(`length_um`, `area_um2`, `count`, `binary`, `digest`), 비교 방식, absolute/relative
+tolerance, weight와 hard-fail 여부를 따로 지정한다. Binary와 digest는 exact 비교만 허용하며 policy는 corpus에
 있는 모든 metric을 빠짐없이 다뤄야 한다. Hard-fail metric 하나라도 기준을 벗어나면 평균점수와
 무관하게 실패한다. Candidate build 시 authority receipt를 다시 확인하고 per-DUT weighted score와
 각 metric 판정을 policy로 재계산한다.
+
+Geometry fingerprint는 polygon 외곽선뿐 아니라 모든 hole ring을 정규화해 hash한다. 각 layer의
+fingerprint와 terminal landing이 닿은 same-layer merged component의 fingerprint/면적/개수, 같은 layer의
+terminal 두 개가 같은 component에 닿는지도 별도 metric으로 저장한다. 전역 fingerprint를 끄더라도
+조직 policy가 이 metric을 `hard_fail=true`로 선택할 수 있다. 이는 단일 layer의 도형 연결 관측이며,
+via stack을 통한 cross-layer 연결이나 G/D/S/B 전기적 정합을 증명하는 LVS가 아니다.
 
 원본 corpus GDS 자체를
 reproduced output으로 제출하면 candidate evidence로 인정하지 않는다. 원본과 SHA가 다른 결과는
