@@ -124,9 +124,10 @@ Pad macro/DUT adapter와 full-PDK DRC/PEX를 연결하지 않았으므로 이를
 | Evidence hardening | code `afd90cd7dbdfdac4ca4d76bee8a5a6ee583fde80`, docs `084a6c116f4021317f90c3a2dd26e28892e157c0` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `715 passed, 1 warning`; [Actions run 33637295915](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33637295915) 전체 green | Lifecycle chain/content-address/schema와 Windows/Ubuntu/KLayout 통합 회귀 통과 |
 | Qualification-gate hardening | code `dbd25060dc35e48e8d1cc55dd9bf313d8bac3d77`, docs `21a4b28cdd58122700ee80adca45e692b28400bf` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `719 passed, 1 warning`; [Actions run 33643053110](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33643053110) 전체 green | Lifecycle trusted head, exact fingerprint/DBU hard gate와 persisted DOE identifiability를 Windows/Ubuntu/KLayout에서 통과 |
 | Policy/model/anchor hardening | code `eb02520b53c95c200ccc6d42413a9d19767ac1bb`, docs `c20522356fc51b4061d3b85a1c5c910f51ff0f3d` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `722 passed, 1 warning`; [Actions run 33693275318](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33693275318) 전체 green | Host-owned candidate policy, compiler-declared basis rank와 optional external lifecycle anchor를 Windows/Ubuntu/KLayout에서 통과 |
+| Metric policy/advisory DOE | `512c67f45df57708d07ff296c91c8cabc60b674e` | 로컬 Windows/Python 3.13.5/KLayout 0.30.10: `723 passed`; [Actions run 33697986336](https://github.com/sjoohw/klayout-mcp-teg/actions/runs/33697986336) 전체 green | Metric별 typed tolerance/weight/hard-fail, score 재계산과 non-blocking DOE stability warning을 Windows/Ubuntu/KLayout에서 통과 |
 
 Local pass와 remote CI green은 별도 조건이다. Review-hardening과 evidence-hardening code set은
-두 조건을 모두 통과했다. Qualification-gate hardening과 최신 policy/model/anchor hardening도 각각
+두 조건을 모두 통과했다. Qualification-gate, policy/model/anchor와 metric/advisory DOE hardening도 각각
 표에 적힌 동일 code/docs snapshot의 remote CI까지 통과했다.
 이는 repository regression 기준선이며 실제 target transistor/foundry qualification을 뜻하지 않는다.
 
