@@ -78,7 +78,8 @@ lock provenance, OS/Python/KLayout, pass/skip/warning과 Actions URL을 가진 g
   Pad/DUT landing을 사용한 84-connection acceptance는 아님.
 - Immutable Pad macro 등록/overlay와 recursive source-cell preservation. Legacy Phase 1 handoff는 아님.
 - Labeled DUT corpus coverage, invariant style, variation resolution, hole-aware fingerprint와 선택적
-  same-layer terminal landing/component metric, compiler-declared basis rank blocker와 normalized
+  same-layer terminal landing/component metric, versioned schema/algorithm과 linear-time ring canonicalization,
+  compiler-declared basis rank blocker와 normalized
   singular-value/condition-number warning,
   train/logical-validation score와 host-owned candidate policy registry. Parameter dependency compiler나 actual
   transistor materialization 검증은 아님.

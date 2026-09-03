@@ -8,28 +8,15 @@ import os
 
 import pya
 
+from .geometry_fingerprint import canonical_ring
 from .worker_protocol import worker_error
-
-
-def _canonical_ring(points):
-    ring = [(int(point.x), int(point.y)) for point in points]
-    if len(ring) > 1 and ring[0] == ring[-1]:
-        ring.pop()
-    if not ring:
-        return []
-    candidates = []
-    for sequence in (ring, list(reversed(ring))):
-        candidates.extend(
-            sequence[index:] + sequence[:index] for index in range(len(sequence))
-        )
-    return [list(point) for point in min(candidates)]
 
 
 def _polygon_payload(polygon):
     return {
-        "hull_dbu": _canonical_ring(polygon.each_point_hull()),
+        "hull_dbu": canonical_ring(polygon.each_point_hull()),
         "holes_dbu": sorted(
-            _canonical_ring(polygon.each_point_hole(index))
+            canonical_ring(polygon.each_point_hole(index))
             for index in range(polygon.holes())
         ),
     }

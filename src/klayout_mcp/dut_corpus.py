@@ -18,6 +18,7 @@ from .file_publication import (
     publication_staging_prefix,
     publish_new_directory,
 )
+from .geometry_fingerprint import GEOMETRY_FINGERPRINT_ALGORITHM_ID
 from .klayout_adapter import create_layout_snapshot, run_klayout_worker
 from .qualification_policy import (
     QualificationPolicyAuthority,
@@ -1126,8 +1127,9 @@ def onboard_dut_corpus(
             "generalization_claim_allowed": False,
         }
         corpus = {
-            "schema_version": 4,
+            "schema_version": 5,
             "artifact_type": "DutCorpusArtifact",
+            "geometry_fingerprint_algorithm_id": GEOMETRY_FINGERPRINT_ALGORITHM_ID,
             "technology_identity": immutable_json_copy(technology_identity),
             "device_family": device_family,
             "topology": topology,
@@ -1232,12 +1234,26 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             details={"field": "package_path", "error_type": type(exc).__name__},
             next_action="Restore the exact content-addressed corpus package.",
         )
-    if not isinstance(corpus, dict) or corpus.get("schema_version") not in {1, 2, 3, 4} or corpus.get("artifact_type") != "DutCorpusArtifact":
+    if not isinstance(corpus, dict) or corpus.get("schema_version") not in {1, 2, 3, 4, 5} or corpus.get("artifact_type") != "DutCorpusArtifact":
         _fail(
             "DUT_CORPUS_PACKAGE_SCHEMA_INVALID",
             "Corpus metadata does not match the supported DutCorpusArtifact schema.",
             details={"field": "corpus.json", "schema_version": corpus.get("schema_version") if isinstance(corpus, dict) else None, "artifact_type": corpus.get("artifact_type") if isinstance(corpus, dict) else None},
-            next_action="Restore a supported schema_version 1, 2, 3, or 4 DutCorpusArtifact package.",
+            next_action="Restore a supported schema_version 1 through 5 DutCorpusArtifact package.",
+        )
+    if corpus.get("schema_version") == 5 and (
+        corpus.get("geometry_fingerprint_algorithm_id")
+        != GEOMETRY_FINGERPRINT_ALGORITHM_ID
+    ):
+        _fail(
+            "DUT_CORPUS_FINGERPRINT_ALGORITHM_INVALID",
+            "The schema v5 corpus does not identify the supported geometry fingerprint algorithm.",
+            details={
+                "field": "geometry_fingerprint_algorithm_id",
+                "received": corpus.get("geometry_fingerprint_algorithm_id"),
+                "expected": GEOMETRY_FINGERPRINT_ALGORITHM_ID,
+            },
+            next_action="Restore the exact corpus package or re-run transistor corpus onboarding.",
         )
     required_mappings = (
         "technology_identity",
@@ -1279,7 +1295,7 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             details={"field": "technology_identity", "invalid_fields": invalid_technology_fields},
             next_action="Restore exact technology and PDK revision identity.",
         )
-    if corpus.get("schema_version") in {2, 3, 4}:
+    if corpus.get("schema_version") in {2, 3, 4, 5}:
         evidence = corpus.get("identifiability_evidence")
         issues = evidence.get("issues") if isinstance(evidence, Mapping) else None
         warnings = evidence.get("warnings") if isinstance(evidence, Mapping) else None
@@ -1294,7 +1310,7 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
         if (
             not isinstance(evidence, Mapping)
             or evidence.get("schema_version")
-            != ({2: 1, 3: 2, 4: 3}[corpus.get("schema_version")])
+            != ({2: 1, 3: 2, 4: 3, 5: 3}[corpus.get("schema_version")])
             or evidence.get("status") not in {"sufficient", "blocked"}
             or isinstance(blocker_count, bool)
             or not isinstance(blocker_count, int)
@@ -1308,7 +1324,7 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
                 for issue in issues
             )
             or (
-                corpus.get("schema_version") == 4
+                corpus.get("schema_version") in {4, 5}
                 and (
                     isinstance(evidence.get("warning_count"), bool)
                     or not isinstance(evidence.get("warning_count"), int)
@@ -1331,7 +1347,7 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             or isinstance(evidence.get("minimum_required_rank"), bool)
             or not isinstance(evidence.get("minimum_required_rank"), int)
             or (
-                corpus.get("schema_version") == 4
+                corpus.get("schema_version") in {4, 5}
                 and (
                     not isinstance(evidence.get("normalized_singular_values"), list)
                     or len(evidence.get("normalized_singular_values", []))
@@ -1391,7 +1407,7 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
                 details={"field": "identifiability_evidence"},
                 next_action="Restore or re-onboard the exact labeled DUT corpus.",
             )
-    if corpus.get("schema_version") in {3, 4}:
+    if corpus.get("schema_version") in {3, 4, 5}:
         normalized_model_spec = _validate_compiler_model_spec(
             corpus.get("compiler_model_spec"), schema=corpus["parameter_schema"]
         )
@@ -1449,14 +1465,14 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             next_action="Restore the exact corpus partition manifest.",
         )
     evidence = corpus.get("identifiability_evidence")
-    if corpus.get("schema_version") in {2, 3} and (
+    if corpus.get("schema_version") in {2, 3, 4, 5} and (
         evidence.get("training_dut_ids") != sorted(train_ids)
         or evidence.get("parameter_names") != sorted(corpus["parameter_schema"])
         or evidence.get("parameter_count") != len(corpus["parameter_schema"])
         or set(evidence.get("conditional_variation", {}))
         != set(corpus["parameter_schema"])
         or (
-            corpus.get("schema_version") == 3
+            corpus.get("schema_version") in {3, 4, 5}
             and (
                 evidence.get("compiler_model_spec_sha256")
                 != canonical_sha256(corpus["compiler_model_spec"])
@@ -1488,6 +1504,28 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
             next_action="Use the canonical corpus package path.",
         )
     return package, corpus, corpus_sha256
+
+
+def _require_current_geometry_fingerprint(corpus: Mapping[str, Any]) -> None:
+    if (
+        corpus.get("schema_version") == 5
+        and corpus.get("geometry_fingerprint_algorithm_id")
+        == GEOMETRY_FINGERPRINT_ALGORITHM_ID
+    ):
+        return
+    _fail(
+        "DUT_CORPUS_REONBOARD_REQUIRED",
+        "This corpus predates hole-aware geometry and terminal-component metrics, so it cannot be compared safely with the current scorer.",
+        details={
+            "received_schema_version": corpus.get("schema_version"),
+            "received_geometry_fingerprint_algorithm_id": corpus.get(
+                "geometry_fingerprint_algorithm_id"
+            ),
+            "required_schema_version": 5,
+            "required_geometry_fingerprint_algorithm_id": GEOMETRY_FINGERPRINT_ALGORITHM_ID,
+        },
+        next_action="Run onboard_transistor_corpus again from the preserved source layout and DUT metadata; do not reuse the legacy scorecard.",
+    )
 
 
 def _load_json_package(
@@ -1925,6 +1963,7 @@ def resolve_corpus_variations(
     """Bind every unexplained variation to an explicit human-selected precedent."""
 
     _, corpus, corpus_sha256 = _load_corpus_package(corpus_package_path)
+    _require_current_geometry_fingerprint(corpus)
     ambiguities = corpus.get("unexplained_variations", [])
     expected = {item["ambiguity_id"]: item for item in ambiguities}
     missing = sorted(set(expected).difference(decisions))
@@ -2016,6 +2055,7 @@ def score_reproduced_corpus(
     """Score a reproduced layout against training and logical-validation DUTs."""
 
     _, corpus, corpus_sha256 = _load_corpus_package(corpus_package_path)
+    _require_current_geometry_fingerprint(corpus)
     _require_identifiability_ready(corpus)
     if (
         not isinstance(compiler_identity, Mapping)
@@ -2384,6 +2424,7 @@ def build_technology_adapter_candidate(
     """Package a scored candidate without claiming foundry qualification."""
 
     _, corpus, corpus_sha256 = _load_corpus_package(corpus_package_path)
+    _require_current_geometry_fingerprint(corpus)
     _require_identifiability_ready(corpus)
     _, resolution, _ = _load_json_package(
         resolution_package_path,

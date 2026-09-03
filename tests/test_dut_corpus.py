@@ -216,6 +216,11 @@ def test_labeled_corpus_round_trip_scoring_and_candidate_package(tmp_path: Path)
         expected_dbu_um=0.001,
         klayout_executable=executable,
     )
+    assert corpus["corpus"]["schema_version"] == 5
+    assert (
+        corpus["corpus"]["geometry_fingerprint_algorithm_id"]
+        == "merged-polygon-rings-v2"
+    )
     assert corpus["clarification_required"] is False
     invariant_names = {item["metric"] for item in corpus["corpus"]["drawing_style_profile"]["invariant_metrics"]}
     assert "active.width_um" in invariant_names
@@ -569,6 +574,76 @@ def test_exact_fingerprint_and_dbu_are_threshold_independent_hard_gates(
         )
 
     assert dbu_mismatch.value.code == "REPRODUCED_CORPUS_DBU_MISMATCH"
+
+    legacy_corpus = json.loads(json.dumps(corpus["corpus"]))
+    legacy_corpus["schema_version"] = 4
+    legacy_corpus.pop("geometry_fingerprint_algorithm_id")
+    legacy_corpus.pop("terminal_observation_summary")
+    for record in legacy_corpus["dut_records"]:
+        record.pop("terminal_metrics", None)
+        record.pop("terminal_pair_metrics", None)
+        record.pop("terminal_connectivity_verified", None)
+        record.pop("terminal_connectivity_scope", None)
+        record["flat_metrics"] = {
+            name: value
+            for name, value in record["flat_metrics"].items()
+            if not name.endswith(".hole_count")
+            and not name.endswith(".geometry_fingerprint_sha256")
+            and not name.startswith("terminal.")
+            and not name.startswith("terminal_pair.")
+        }
+        for metrics in record["layer_metrics"].values():
+            metrics.pop("hole_count", None)
+            metrics.pop("geometry_fingerprint_sha256", None)
+    legacy_package = tmp_path / "legacy-corpora" / canonical_sha256(legacy_corpus)
+    legacy_package.mkdir(parents=True)
+    (legacy_package / "corpus.json").write_bytes(
+        canonical_json_bytes(legacy_corpus)
+    )
+    source_name = next(Path(corpus["package_path"]).glob("source.*")).name
+    (legacy_package / source_name).write_bytes(source.read_bytes())
+
+    with pytest.raises(AnalysisError) as legacy_resolution:
+        resolve_corpus_variations(
+            corpus_package_path=legacy_package,
+            decisions={},
+            resolution_root=tmp_path / "legacy-resolutions",
+            resolved_by="reviewer://device-team",
+            resolved_at="2026-09-03T00:00:00Z",
+        )
+    assert legacy_resolution.value.code == "DUT_CORPUS_REONBOARD_REQUIRED"
+    assert legacy_resolution.value.details["received_schema_version"] == 4
+    assert (
+        legacy_resolution.value.details[
+            "received_geometry_fingerprint_algorithm_id"
+        ]
+        is None
+    )
+    assert legacy_resolution.value.details["required_schema_version"] == 5
+    assert (
+        legacy_resolution.value.details[
+            "required_geometry_fingerprint_algorithm_id"
+        ]
+        == "merged-polygon-rings-v2"
+    )
+    assert "onboard_transistor_corpus" in legacy_resolution.value.next_action
+
+    with pytest.raises(AnalysisError) as legacy_score:
+        score_reproduced_corpus(
+            corpus_package_path=legacy_package,
+            reproduced_layout_path=str(reproduced),
+            reproduced_cell_by_dut_id={"D1": "R1", "D2": "R2", "D3": "R3"},
+            scoring_policy={
+                "absolute_tolerance": 0,
+                "relative_tolerance": 0,
+                "minimum_aggregate_score": 1,
+                "exact_fingerprint_required": True,
+            },
+            scorecard_root=tmp_path / "legacy-scores",
+            compiler_identity=_compiler_identity(corpus),
+            worker_runner=worker_with_fingerprints(["1", "2", "3"]),
+        )
+    assert legacy_score.value.code == "DUT_CORPUS_REONBOARD_REQUIRED"
 
 
 def test_qualification_policy_applies_typed_per_metric_rules(tmp_path: Path) -> None:

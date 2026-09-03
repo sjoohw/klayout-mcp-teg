@@ -36,7 +36,7 @@ LLM orchestration 지침도 저장소에 함께 둔다. 범용 GDS/PCell 작업�
 | Reference style 추출 | 가능 | hierarchy/layer/직교성/치수 빈도 관측; rule·net·전기 특성 추론 없음 |
 | Direct-measurement Phase 1 | 제한된 nonproduction scaffold | Transistor adapter 없음, Pad 재합성; bounded polyline은 multi-rail mesh로 compile |
 | Pad macro onboarding | 지원 | Source cell을 immutable artifact로 등록하고 새 top에서 instance overlay; Phase 1과는 아직 미연결 |
-| Transistor corpus onboarding | 지원 | Polygon hole을 포함한 geometry fingerprint와 선택적 terminal landing/same-layer component 관측을 저장; compiler가 선언한 basis의 DOE rank 부족은 blocker로, condition number 등 수치 안정성은 warning으로 corpus에 결속; caller score는 진단 전용이며 host 승인 policy가 metric별 단위·허용오차·가중치·hard-fail을 지정; terminal 관측은 LVS나 cross-layer connectivity 증거가 아니며 실행 receipt·sealed 평가·신규 공정 PCell·foundry 승인도 아님 |
+| Transistor corpus onboarding | 지원 | Schema v5가 hole-aware fingerprint algorithm ID와 선택적 terminal landing/same-layer component 관측을 저장; 구형 corpus는 재-onboarding 방법을 명시하고 scoring 전에 중단; compiler가 선언한 basis의 DOE rank 부족은 blocker로, condition number 등 수치 안정성은 warning으로 corpus에 결속; terminal 관측은 LVS나 cross-layer connectivity 증거가 아니며 실행 receipt·sealed 평가·신규 공정 PCell·foundry 승인도 아님 |
 | Persistent `teg_intake` | 제한 지원 | Stock은 bundled research-only Kelvin resistor profile/version에 한정; 임의 target은 host provider 필요 |
 | Persistent plan/generate/verify | Host 통합 필요 | Target-production verifier/provider/engine과 external runner/policy 필요 |
 | Foundry sign-off·PCM release | 불가 | 실제 PDK/deck/probe/scribe/조직 정책 필요 |

@@ -262,6 +262,10 @@ terminal 두 개가 같은 component에 닿는지도 별도 metric으로 저장�
 조직 policy가 이 metric을 `hard_fail=true`로 선택할 수 있다. 이는 단일 layer의 도형 연결 관측이며,
 via stack을 통한 cross-layer 연결이나 G/D/S/B 전기적 정합을 증명하는 LVS가 아니다.
 
+이 형식은 corpus schema v5와 `merged-polygon-rings-v2` algorithm ID로 고정된다. 외곽선과 hole ring의
+시작점·방향 정규화는 꼭짓점 수에 선형인 minimum-rotation 알고리즘을 사용한다. 구형 schema v1~v4는
+새 metric과 자동 혼합하지 않으며 resolution/scoring/candidate 단계에서 재-onboarding 방법을 명시한다.
+
 원본 corpus GDS 자체를
 reproduced output으로 제출하면 candidate evidence로 인정하지 않는다. 원본과 SHA가 다른 결과는
 `distinct_stream_logical_validation_no_execution_receipt`로만 표시한다. Resolution/scorecard/candidate를

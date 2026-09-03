@@ -568,7 +568,7 @@ Upgrade checkpoint 진행:
 - [x] 여러 labeled DUT cell과 parameter row, semantic layer/terminal mapping, logical validation partition을
   받는 corpus artifact와 coverage/identifiability gate를 구현했다. 같은 source에 geometry가 보이므로
   sealed holdout이라고 주장하지 않는다.
-- [x] Identifiability blocker를 corpus schema v4/evidence schema v3에 영구 결속하고 compiler-declared
+- [x] Identifiability blocker를 corpus schema v5/evidence schema v3에 영구 결속하고 compiler-declared
   main/interaction/category/threshold-regime basis의 normalized design-matrix rank, minimum singular value와
   condition number를 검사한다. 거의 공선인 full-rank DOE는 warning으로 보고하며 parameter-space
   margin과 안정성 임계값은 설명용이지 자동 blocker가 아니다.
@@ -594,7 +594,9 @@ Upgrade checkpoint 진행:
 - [x] Exact geometry fingerprint에 polygon hole ring을 포함하고 layer별 digest를 저장한다. 선택적 terminal
   landing box로 landing 존재, touched same-layer component digest/면적/개수와 terminal-pair same-component를
   metric화했다. 미선언·미관측 landing은 warning이며, 승인 policy가 필요한 metric만 hard-fail로 선택한다.
-  이 관측을 cross-layer connectivity나 LVS 증거로 승격하지 않는다.
+  Schema v5에 `merged-polygon-rings-v2` algorithm ID를 결속하고 구형 corpus는 actionable re-onboarding을
+  요구한다. Ring canonicalization은 linear-time minimum rotation을 사용한다. 이 관측을 cross-layer
+  connectivity나 LVS 증거로 승격하지 않는다.
 - [ ] Corpus로부터 CPP 연계 Poly/Active/contact/implant/terminal dependency recipe를 자동 합성하는
   process-specific compiler는 만들지 않았다. 실제 labeled corpus, topology 규칙과 foundry 검증 없이는
   한 GDS에서 이를 추론하지 않으며 candidate score를 PCell/electrical/foundry 동등성으로 승격하지 않는다.

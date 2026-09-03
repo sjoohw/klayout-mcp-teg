@@ -249,6 +249,10 @@ Reproduced GDS의 caller-selected score는 진단용이다. Candidate를 만들�
 Fingerprint는 polygon hole을 포함한다. Layer와 terminal이 닿은 same-layer component의 digest 및
 terminal-pair same-component 결과도 조직 policy에서 개별 hard-fail metric으로 선택할 수 있다. 이
 관측은 cross-layer via connectivity나 LVS를 대신하지 않는다.
+현재 onboarding 결과는 corpus schema v5와 `geometry_fingerprint_algorithm_id=merged-polygon-rings-v2`를
+저장한다. 이전 schema v1~v4 package는 보존·식별할 수 있지만 새 metric과 섞어 비교하지 않는다.
+Resolution, scoring 또는 candidate 생성을 시도하면 `DUT_CORPUS_REONBOARD_REQUIRED`와 함께 원본 layout과
+DUT metadata로 `onboard_transistor_corpus`를 다시 실행하라고 안내한다.
 
 현재 경로는 CPP가 바뀔 때 Gate/Active/Contact/implant/terminal을 함께 움직이는 dependency recipe나
 callable PCell을 자동 생성하지 않는다. 실제 compiler identity/code hash는 candidate에 결속되지만,
