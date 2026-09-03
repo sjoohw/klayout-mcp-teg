@@ -941,13 +941,21 @@ def test_identifiability_uses_declared_interaction_basis_not_oat_heuristic(
     stability = nearly_collinear["corpus"]["identifiability_evidence"]
     assert stability["normalized_design_matrix_rank"] == 3
     assert stability["minimum_required_rank"] == 3
-    assert stability["status"] == "blocked"
+    assert stability["status"] == "sufficient"
+    assert stability["blocker_count"] == 0
+    assert stability["warning_count"] == 1
     assert stability["normalized_design_condition_number"] > 10_000
     assert stability["minimum_normalized_singular_value"] < 1e-4
     assert stability["normalized_parameter_space_margin"] > 0
+    assert stability["issues"] == []
     assert {
-        issue["code"] for issue in stability["issues"]
-    } == {"DUT_COMPILER_BASIS_NUMERICALLY_UNSTABLE"}
+        warning["code"] for warning in stability["warnings"]
+    } == {"DUT_COMPILER_BASIS_NUMERICAL_STABILITY_WARNING"}
+    assert nearly_collinear["clarification_required"] is False
+    assert {
+        issue["code"]
+        for issue in nearly_collinear["clarification_request"]["issues"]
+    } == {"DUT_COMPILER_BASIS_NUMERICAL_STABILITY_WARNING"}
 
 
 @pytest.mark.parametrize(

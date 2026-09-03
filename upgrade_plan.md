@@ -164,6 +164,10 @@ artifact hash가 process capability 및 workflow manifest에 포함되어야 한
 3. 독립적으로 확인 가능한 오류는 fail-fast로 하나씩 숨기지 않고 한 번에 모아 deterministic order로
    반환한다. MCP context에는 정해진 개수만 보여주되 `total_issue_count`와 truncation 여부 및 전체
    content-addressed report handle을 제공한다. Warning은 blocker와 분리한다.
+   Blocker는 schema상 필수값 누락, 모순된 identity/hash, 수학적으로 식별 불가능한 model, source 손상
+   위험 또는 사용자가 승인한 qualification hard-fail처럼 계속 진행할 수 없음이 확실한 경우로 제한한다.
+   경험적 threshold, 품질 권고와 아직 검증되지 않은 heuristic은 warning이 기본이며
+   `clarification_required`나 drawing 진행을 자동으로 막지 않는다.
 4. 사용자의 선택이 필요한 경우 stable `question_id`, 쉬운 문장의 질문, 필요한 이유, 허용 option과
    각 option의 영향, answer schema를 제공한다. PDK 값이나 사용자의 의도를 시스템이 발명해
    `suggested_fix`에 넣지 않는다.
@@ -416,8 +420,9 @@ example layout + DUT parameter manifest
 6. Candidate fitting 전에 train/reference-candidate와 holdout DUT ID를 `CorpusPartitionManifest`로
    확정·hash한다. Holdout geometry/labels은 recipe/style extraction과 reference selection에서 읽을 수 없는
    sealed input으로 두고, split 이후의 교체나 leakage는 새 corpus/version으로만 처리한다.
-7. 선언된 main/interaction/categorical/regime basis가 full rank가 아니거나 column-normalized design
-   matrix의 minimum singular value/condition number가 안정성 gate를 넘지 못하면 추론하지 않는다.
+7. 선언된 main/interaction/categorical/regime basis가 full rank가 아니면 추론하지 않는다. 이는 확정적
+   blocker다. Column-normalized design matrix의 minimum singular value/condition number가 경험적
+   warning 기준을 벗어나면 근거와 개선 조합을 보여주되 작업을 막지 않는다.
    `DUT_COMPILER_BASIS_NOT_IDENTIFIABLE`에 실제 rank, 필요한 basis term 수와 추가 DUT가 필요한 이유를
    반환한다. L과 CPP의 개별 축만으로 `L×CPP`를 식별했다고 주장하지 않으며, full-rank 일반 DOE를
    one-factor-at-a-time 쌍이 없다는 이유만으로 차단하지 않는다. 동일 parameter row가 서로 다른
@@ -563,7 +568,8 @@ Upgrade checkpoint 진행:
   sealed holdout이라고 주장하지 않는다.
 - [x] Identifiability blocker를 corpus schema v4/evidence schema v3에 영구 결속하고 compiler-declared
   main/interaction/category/threshold-regime basis의 normalized design-matrix rank, minimum singular value와
-  condition number를 검사한다. 거의 공선인 full-rank DOE도 차단하며 parameter-space margin은 설명용이다.
+  condition number를 검사한다. 거의 공선인 full-rank DOE는 warning으로 보고하며 parameter-space
+  margin과 안정성 임계값은 설명용이지 자동 blocker가 아니다.
   Conditional-variation witness는 설명용이며 hard gate가 아니다. Blocker가 하나라도 있거나 exact
   model-spec hash evidence가 없으면 score/candidate 단계가 fail-closed한다.
 - [x] Observed invariant style metric과 same-parameter/different-geometry ambiguity를 검출하고, 사용자가

@@ -227,12 +227,12 @@ fitting 계산에서 제외하지만 같은 source GDS와 metadata에 남는다.
 
 `compiler_model_spec`에는 실제 compiler가 사용하는 basis를 명시한다. 지원 항목은 intercept,
 parameter main effect, 여러 parameter interaction, 숫자 category indicator와 threshold-based regime다.
-Training DUT로 만든 그 basis matrix가 full rank인지 검사한다. 이어 각 열의 크기를 정규화한 뒤
-minimum singular value와 condition number를 검사한다. 따라서 형식상 full rank여도 L, CPP와 cell
-height가 거의 같은 비율로 움직여 작은 입력 오차가 큰 coefficient 변화를 만드는 DOE는 차단한다.
-현재 고정 gate는 minimum normalized singular value `1e-4` 이상, normalized condition number
-`10000` 이하다. Parameter-space minimum margin도 evidence에 기록하지만 추가 근접 샘플 하나가 있다는
-이유만으로 정상 DOE를 막지 않도록 참고 정보로만 사용한다. 따라서 L과 CPP의 각 축 예제가 있어도
+Training DUT로 만든 그 basis matrix가 full rank인지 검사한다. Rank 부족은 선언한 model을 식별할 수
+없다는 확정적 blocker다. 이어 각 열의 크기를 정규화한 뒤 minimum singular value와 condition number를
+계산한다. 형식상 full rank여도 L, CPP와 cell height가 거의 같은 비율로 움직이면 불안정 가능성을
+warning으로 보여주지만 작업은 계속할 수 있다. 현재 warning 기준은 minimum normalized singular value
+`1e-4` 미만 또는 normalized condition number `10000` 초과다. 이 값은 보편적 합격선이 아니며
+parameter-space minimum margin과 함께 참고 정보로만 사용한다. 따라서 L과 CPP의 각 축 예제가 있어도
 `L×CPP` 항이 식별되지 않으면 차단하고, 반대로 일반 DOE가 full rank라면 one-factor-at-a-time 쌍이
 없다는 이유만으로 차단하지 않는다. Conditional-variation 쌍은 이해를 돕는 정보일 뿐 합격 조건이
 아니다. 부족한 basis와 rank는 `identifiability_evidence`에 영구 저장되며 score와 candidate 생성은

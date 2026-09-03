@@ -218,7 +218,6 @@ def _validate_policy_document(
         or missing_metric_rules
         or unexpected_metric_rules
         or positive_weight_count == 0
-        or hard_fail_count == 0
     ):
         _fail(
             "ADAPTER_QUALIFICATION_POLICY_INVALID",

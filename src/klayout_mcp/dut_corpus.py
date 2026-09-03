@@ -30,8 +30,8 @@ from .workflow_manifest import canonical_json_bytes, canonical_sha256, immutable
 
 
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-MAX_NORMALIZED_DESIGN_CONDITION_NUMBER = 10_000.0
-MIN_NORMALIZED_DESIGN_SINGULAR_VALUE = 1e-4
+NUMERICAL_STABILITY_WARNING_CONDITION_NUMBER = 10_000.0
+NUMERICAL_STABILITY_WARNING_MINIMUM_SINGULAR_VALUE = 1e-4
 ADAPTER_IDENTITY_FIELDS = frozenset(
     {
         "technology",
@@ -629,7 +629,7 @@ def _build_identifiability_evidence(
     schema: Mapping[str, Any],
     training: list[Mapping[str, Any]],
     compiler_model_spec: Mapping[str, Any],
-) -> tuple[dict[str, Any], list[ActionableIssue]]:
+) -> tuple[dict[str, Any], list[ActionableIssue], list[ActionableIssue]]:
     parameter_names = sorted(schema)
     values_by_parameter = {
         name: [float(record["parameters"][name]) for record in training]
@@ -671,6 +671,7 @@ def _build_identifiability_evidence(
         spans=spans,
     )
     issues: list[ActionableIssue] = []
+    warnings: list[ActionableIssue] = []
     if design_rank < required_rank:
         issues.append(
             ActionableIssue(
@@ -688,17 +689,18 @@ def _build_identifiability_evidence(
         )
     elif (
         minimum_singular_value is None
-        or minimum_singular_value < MIN_NORMALIZED_DESIGN_SINGULAR_VALUE
+        or minimum_singular_value
+        < NUMERICAL_STABILITY_WARNING_MINIMUM_SINGULAR_VALUE
         or condition_number is None
-        or condition_number > MAX_NORMALIZED_DESIGN_CONDITION_NUMBER
+        or condition_number > NUMERICAL_STABILITY_WARNING_CONDITION_NUMBER
     ):
-        issues.append(
+        warnings.append(
             ActionableIssue(
-                code="DUT_COMPILER_BASIS_NUMERICALLY_UNSTABLE",
+                code="DUT_COMPILER_BASIS_NUMERICAL_STABILITY_WARNING",
                 category="coverage_or_identifiability",
-                severity="blocker",
+                severity="warning",
                 stage="corpus_onboarding",
-                message="The training DOE is full-rank but too close to collinear for stable compiler fitting.",
+                message="The training DOE is full-rank but may be too close to collinear for stable compiler fitting.",
                 field_path="/compiler_model_spec/basis_terms",
                 received={
                     "minimum_normalized_singular_value": minimum_singular_value,
@@ -706,11 +708,11 @@ def _build_identifiability_evidence(
                     "normalized_parameter_space_margin": parameter_space_margin,
                 },
                 expected={
-                    "minimum_normalized_singular_value": MIN_NORMALIZED_DESIGN_SINGULAR_VALUE,
-                    "maximum_normalized_design_condition_number": MAX_NORMALIZED_DESIGN_CONDITION_NUMBER,
+                    "advisory_minimum_normalized_singular_value": NUMERICAL_STABILITY_WARNING_MINIMUM_SINGULAR_VALUE,
+                    "advisory_maximum_normalized_design_condition_number": NUMERICAL_STABILITY_WARNING_CONDITION_NUMBER,
                 },
-                reason="Small input changes could produce large fitted-coefficient changes even though the matrix rank is technically full.",
-                fix="Add DUT points that separate the coupled parameters and declared interaction/regime terms more widely.",
+                reason="Small input changes may produce large fitted-coefficient changes, but this heuristic is not certain enough to reject the corpus.",
+                fix="Proceed for exploration, or add DUT points that separate the coupled parameters and declared interaction/regime terms more widely before qualification.",
             )
         )
 
@@ -738,6 +740,8 @@ def _build_identifiability_evidence(
         "status": "blocked" if issues else "sufficient",
         "blocker_count": len(issues),
         "issues": [issue.to_dict() for issue in issues],
+        "warning_count": len(warnings),
+        "warnings": [warning.to_dict() for warning in warnings],
         "training_dut_ids": sorted(record["dut_id"] for record in training),
         "parameter_names": parameter_names,
         "parameter_count": len(parameter_names),
@@ -746,36 +750,28 @@ def _build_identifiability_evidence(
         "normalized_design_matrix_rank": design_rank,
         "minimum_required_rank": required_rank,
         **stability,
-        "maximum_allowed_normalized_design_condition_number": MAX_NORMALIZED_DESIGN_CONDITION_NUMBER,
-        "minimum_required_normalized_singular_value": MIN_NORMALIZED_DESIGN_SINGULAR_VALUE,
+        "numerical_stability_warning_condition_number": NUMERICAL_STABILITY_WARNING_CONDITION_NUMBER,
+        "numerical_stability_warning_minimum_singular_value": NUMERICAL_STABILITY_WARNING_MINIMUM_SINGULAR_VALUE,
+        "numerical_stability_is_advisory": True,
         "normalized_parameter_space_margin": parameter_space_margin,
         "parameter_space_margin_is_informational": True,
         "conditional_variation": conditional_variation,
-        "decision_rule": "compiler_declared_basis_full_rank_and_numerically_stable",
+        "decision_rule": "compiler_declared_basis_full_rank_with_advisory_numerical_stability",
     }
-    return evidence, issues
+    return evidence, issues, warnings
 
 
 def _require_identifiability_ready(corpus: Mapping[str, Any]) -> None:
     evidence = corpus.get("identifiability_evidence")
-    if (
-        corpus.get("schema_version") != 4
-        or not isinstance(evidence, Mapping)
-        or evidence.get("schema_version") != 3
-    ):
+    if not isinstance(evidence, Mapping):
         _fail(
             "DUT_CORPUS_IDENTIFIABILITY_EVIDENCE_MISSING",
-            "The corpus has no current rank-and-stability identifiability evidence.",
+            "The corpus has no persisted parameter-identifiability evidence.",
             details={
                 "field": "identifiability_evidence",
                 "corpus_schema_version": corpus.get("schema_version"),
-                "evidence_schema_version": (
-                    evidence.get("schema_version")
-                    if isinstance(evidence, Mapping)
-                    else None
-                ),
             },
-            next_action="Re-onboard the labeled DUT corpus with current rank, singular-value, and condition-number analysis.",
+            next_action="Re-onboard the labeled DUT corpus with declared-basis rank analysis.",
         )
     model_spec = corpus.get("compiler_model_spec")
     if (
@@ -791,8 +787,6 @@ def _require_identifiability_ready(corpus: Mapping[str, Any]) -> None:
     blocker_count = evidence.get("blocker_count")
     rank = evidence.get("normalized_design_matrix_rank")
     required_rank = evidence.get("minimum_required_rank")
-    minimum_singular_value = evidence.get("minimum_normalized_singular_value")
-    condition_number = evidence.get("normalized_design_condition_number")
     if (
         evidence.get("status") != "sufficient"
         or blocker_count != 0
@@ -801,13 +795,6 @@ def _require_identifiability_ready(corpus: Mapping[str, Any]) -> None:
         or isinstance(required_rank, bool)
         or not isinstance(required_rank, int)
         or rank < required_rank
-        or isinstance(minimum_singular_value, bool)
-        or not isinstance(minimum_singular_value, (int, float))
-        or float(minimum_singular_value)
-        < MIN_NORMALIZED_DESIGN_SINGULAR_VALUE
-        or isinstance(condition_number, bool)
-        or not isinstance(condition_number, (int, float))
-        or float(condition_number) > MAX_NORMALIZED_DESIGN_CONDITION_NUMBER
     ):
         issues = evidence.get("issues")
         _fail(
@@ -825,10 +812,8 @@ def _require_identifiability_ready(corpus: Mapping[str, Any]) -> None:
                 else [],
                 "normalized_design_matrix_rank": rank,
                 "minimum_required_rank": required_rank,
-                "minimum_normalized_singular_value": minimum_singular_value,
-                "normalized_design_condition_number": condition_number,
             },
-            next_action="Add DUT examples that make the declared compiler basis full-rank and numerically stable, then onboard a new corpus version.",
+            next_action="Add DUT examples that make the declared compiler basis full-rank, then onboard a new corpus version.",
         )
 
 
@@ -934,7 +919,7 @@ def onboard_dut_corpus(
                     )
                 )
         training = [record for record in enriched if record["dut_id"] not in set(validation_dut_ids)]
-        identifiability_evidence, identifiability_issues = (
+        identifiability_evidence, identifiability_issues, identifiability_warnings = (
             _build_identifiability_evidence(
                 schema=schema,
                 training=training,
@@ -1003,11 +988,15 @@ def onboard_dut_corpus(
                 shutil.rmtree(staging)
     clarification = ValidationReport.build(
         summary=(
-            f"corpus onboarding에서 blocker {len(identifiability_issues)}건과 사용자 결정 {len(questions)}건이 남았습니다."
+            f"corpus onboarding에서 blocker {len(identifiability_issues)}건, warning {len(identifiability_warnings)}건과 사용자 결정 {len(questions)}건이 남았습니다."
             if questions or identifiability_issues
-            else "corpus onboarding이 완료되었으며 unresolved geometry variation이 없습니다."
+            else (
+                f"corpus onboarding이 완료되었으며 warning {len(identifiability_warnings)}건이 있습니다."
+                if identifiability_warnings
+                else "corpus onboarding이 완료되었으며 unresolved geometry variation이 없습니다."
+            )
         ),
-        issues=identifiability_issues,
+        issues=(*identifiability_issues, *identifiability_warnings),
         questions=tuple(questions),
         next_action=(
             "Add missing parameter coverage and resolve every drawing-precedent question before fitting."
@@ -1098,6 +1087,7 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
     if corpus.get("schema_version") in {2, 3, 4}:
         evidence = corpus.get("identifiability_evidence")
         issues = evidence.get("issues") if isinstance(evidence, Mapping) else None
+        warnings = evidence.get("warnings") if isinstance(evidence, Mapping) else None
         conditional = (
             evidence.get("conditional_variation")
             if isinstance(evidence, Mapping)
@@ -1121,6 +1111,22 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
                 or issue.get("severity") != "blocker"
                 or not isinstance(issue.get("code"), str)
                 for issue in issues
+            )
+            or (
+                corpus.get("schema_version") == 4
+                and (
+                    isinstance(evidence.get("warning_count"), bool)
+                    or not isinstance(evidence.get("warning_count"), int)
+                    or evidence.get("warning_count") < 0
+                    or not isinstance(warnings, list)
+                    or evidence.get("warning_count") != len(warnings)
+                    or any(
+                        not isinstance(warning, Mapping)
+                        or warning.get("severity") != "warning"
+                        or not isinstance(warning.get("code"), str)
+                        for warning in warnings
+                    )
+                )
             )
             or not isinstance(conditional, Mapping)
             or not isinstance(evidence.get("training_dut_ids"), list)
@@ -1168,27 +1174,18 @@ def _load_corpus_package(package_path: str | Path) -> tuple[Path, dict[str, Any]
                             or evidence.get("normalized_design_condition_number") < 1
                         )
                     )
-                    or evidence.get("maximum_allowed_normalized_design_condition_number")
-                    != MAX_NORMALIZED_DESIGN_CONDITION_NUMBER
-                    or evidence.get("minimum_required_normalized_singular_value")
-                    != MIN_NORMALIZED_DESIGN_SINGULAR_VALUE
+                    or evidence.get("numerical_stability_warning_condition_number")
+                    != NUMERICAL_STABILITY_WARNING_CONDITION_NUMBER
+                    or evidence.get("numerical_stability_warning_minimum_singular_value")
+                    != NUMERICAL_STABILITY_WARNING_MINIMUM_SINGULAR_VALUE
+                    or evidence.get("numerical_stability_is_advisory") is not True
                     or isinstance(evidence.get("normalized_parameter_space_margin"), bool)
                     or not isinstance(evidence.get("normalized_parameter_space_margin"), (int, float))
                     or not math.isfinite(float(evidence.get("normalized_parameter_space_margin")))
                     or evidence.get("normalized_parameter_space_margin") < 0
                     or evidence.get("parameter_space_margin_is_informational") is not True
                     or evidence.get("decision_rule")
-                    != "compiler_declared_basis_full_rank_and_numerically_stable"
-                    or (
-                        evidence.get("status") == "sufficient"
-                        and (
-                            not isinstance(evidence.get("normalized_design_condition_number"), (int, float))
-                            or evidence.get("normalized_design_condition_number")
-                            > MAX_NORMALIZED_DESIGN_CONDITION_NUMBER
-                            or evidence.get("minimum_normalized_singular_value")
-                            < MIN_NORMALIZED_DESIGN_SINGULAR_VALUE
-                        )
-                    )
+                    != "compiler_declared_basis_full_rank_with_advisory_numerical_stability"
                 )
             )
             or (evidence.get("status") == "sufficient") != (blocker_count == 0)

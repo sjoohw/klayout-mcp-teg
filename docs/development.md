@@ -77,8 +77,8 @@ lock provenance, OS/Python/KLayout, pass/skip/warning과 Actions URL을 가진 g
 - Phase 1 polyline→multi-rail mesh integration, bend/terminal tie와 bounded-search stress. 실제
   Pad/DUT landing을 사용한 84-connection acceptance는 아님.
 - Immutable Pad macro 등록/overlay와 recursive source-cell preservation. Legacy Phase 1 handoff는 아님.
-- Labeled DUT corpus coverage, invariant style, variation resolution, compiler-declared basis rank와
-  normalized singular-value/condition-number 안정성,
+- Labeled DUT corpus coverage, invariant style, variation resolution, compiler-declared basis rank blocker와
+  normalized singular-value/condition-number warning,
   train/logical-validation score와 host-owned candidate policy registry. Parameter dependency compiler나 actual
   transistor materialization 검증은 아님.
 - PCellizer occurrence/array inventory와 transform/snapshot determinism, non-array direct-box static-GDS
@@ -115,7 +115,7 @@ Ubuntu KLayout integration은 공식 package/checksum과 offscreen Qt를 사용�
 9. Phase 1 polyline의 multi-rail mesh composition과 router node/wall-time budget.
 10. Immutable Pad macro overlay, labeled DUT corpus/logical-validation score와 exact candidate registry.
 11. Caller diagnostic policy와 host-approved candidate policy 분리, metric별 type/tolerance/weight/hard-fail과 approval receipt 재검증.
-12. Compiler-declared main/interaction/category/regime basis에 대한 identifiability rank·수치 안정성과 corpus hash binding.
+12. Compiler-declared basis에 대한 identifiability rank blocker·수치 안정성 warning과 corpus hash binding.
 13. Optional external lifecycle trust anchor와 local-only writer-compromise 한계의 doctor 표시.
 
 남은 우선순위:
